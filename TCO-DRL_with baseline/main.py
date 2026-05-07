@@ -11,6 +11,10 @@ warnings.filterwarnings("ignore", message="`tf.layers.dense` is deprecated.*")
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import random
+import sys
+import atexit
+import json
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -22,11 +26,49 @@ from model import baseline_DQN, baseline_PPO, DuelingDoubleDQN, baselines, BLOR
 from utils import get_args
 
 
+# -----------------------------------------------------------------------------
+# Automatic run logging
+# -----------------------------------------------------------------------------
+# Every run creates a full console log named like: 26_5_7_18_05.txt
+# Format: YY_M_D_HH_MM. This matches the user's existing log naming style.
+os.makedirs("./output", exist_ok=True)
+_run_now = datetime.now()
+RUN_ID = f"{_run_now.year % 100}_{_run_now.month}_{_run_now.day}_{_run_now.hour:02d}_{_run_now.minute:02d}"
+RUN_TXT_PATH = os.path.join("./output", f"{RUN_ID}.txt")
+RUN_CSV_PATH = os.path.join("./output", f"{RUN_ID}_final_results.csv")
+RUN_JSON_PATH = os.path.join("./output", f"{RUN_ID}_final_results.json")
+
+
+class Tee:
+    """Write console output to both terminal and a log file."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            try:
+                stream.write(data)
+            except Exception:
+                pass
+        self.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            try:
+                stream.flush()
+            except Exception:
+                pass
+
+
+_log_f = open(RUN_TXT_PATH, "w", encoding="utf-8")
+sys.stdout = Tee(sys.__stdout__, _log_f)
+sys.stderr = Tee(sys.__stderr__, _log_f)
+atexit.register(_log_f.close)
+print(f"Run log path: {RUN_TXT_PATH}")
+
 args = get_args()
 np.random.seed(args.Seed)
 random.seed(args.Seed)
-
-os.makedirs("./output", exist_ok=True)
 
 # Store final averaged results.
 performance_lamda = np.zeros(args.Baseline_num)
@@ -314,3 +356,49 @@ print('requests assigned to normal oracle:')
 print(performance_assigned_normal_num)
 print('requests assigned to trusted oracle:')
 print(performance_assigned_trusted_num)
+
+# Save machine-readable final results with the same timestamp prefix as the .txt log.
+final_results_df = pd.DataFrame({
+    "method": list(args.Baselines),
+    "avg_responseT": performance_lamda,
+    "total_rewards": performance_total_rewards,
+    "success_rate": performance_success,
+    "success_time_rate": performance_success_time,
+    "finishT": performance_finishT,
+    "cost": performance_cost,
+    "match_rate": performance_match,
+    "assigned_malicious": performance_assigned_malicious_num,
+    "assigned_normal": performance_assigned_normal_num,
+    "assigned_trusted": performance_assigned_trusted_num,
+})
+final_results_df.to_csv(RUN_CSV_PATH, index=False, encoding="utf-8-sig")
+
+run_metadata = {
+    "run_id": RUN_ID,
+    "log_txt": RUN_TXT_PATH,
+    "final_results_csv": RUN_CSV_PATH,
+    "eval_start": int(eval_start),
+    "epoch": int(args.Epoch),
+    "request_num": int(args.Request_Num),
+    "scenario": args.Scenario,
+    "success_mode": args.Success_Mode,
+    "state_mode": args.State_Mode,
+    "reward_mode": args.Reward_Mode,
+    "action_mask_mode": args.Action_Mask_Mode,
+    "baselines": list(args.Baselines),
+    "seed": int(args.Seed),
+    "reward_scale": float(args.Reward_Scale),
+    "reward_clip": float(args.Reward_Clip),
+}
+with open(RUN_JSON_PATH, "w", encoding="utf-8") as f:
+    json.dump({
+        "metadata": run_metadata,
+        "final_results": final_results_df.to_dict(orient="records"),
+    }, f, indent=2, ensure_ascii=False)
+
+print('saved run log txt:')
+print(RUN_TXT_PATH)
+print('saved final results csv:')
+print(RUN_CSV_PATH)
+print('saved final results json:')
+print(RUN_JSON_PATH)
