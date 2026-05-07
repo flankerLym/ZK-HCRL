@@ -1,15 +1,34 @@
+import os
+# Silence TensorFlow GPU / CUDA probing messages on CPU-only Windows machines.
+# Must be set before importing tensorflow through model.py.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+import warnings
+warnings.filterwarnings("ignore", message="`tf.layers.dense` is deprecated.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+import random
+
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 import seaborn as sns
 
 from env import SchedulingEnv
-from model import baseline_DQN, baselines, BLOR
+from model import baseline_DQN, baseline_PPO, DuelingDoubleDQN, baselines, BLOR
 from utils import get_args
 
 
 args = get_args()
-# store result
+np.random.seed(args.Seed)
+random.seed(args.Seed)
+
+os.makedirs("./output", exist_ok=True)
+
+# Store final averaged results.
 performance_lamda = np.zeros(args.Baseline_num)
 performance_total_rewards = np.zeros(args.Baseline_num)
 performance_success = np.zeros(args.Baseline_num)
@@ -21,125 +40,171 @@ performance_assigned_malicious_num = np.zeros(args.Baseline_num)
 performance_assigned_normal_num = np.zeros(args.Baseline_num)
 performance_assigned_trusted_num = np.zeros(args.Baseline_num)
 
-# gen env
+# Generate environment.
 env = SchedulingEnv(args)
 
-
-# build model
-brainRL = baseline_DQN(env.actionNum, env.s_features)
+# Build models.
 brainOthers = baselines(env.actionNum, env.oracleTypes)
+brainDQN = None
+brainPPO = None
+brainRA = None
+
+if "DQN" in args.Baselines:
+    brainDQN = baseline_DQN(env.actionNum, env.s_features, hidden_units=args.Dqn_hidden, scope="DQN")
+
+if "PPO" in args.Baselines:
+    brainPPO = baseline_PPO(
+        env.actionNum,
+        env.s_features,
+        batch_size=args.PPO_batch_size,
+        update_epochs=args.PPO_update_epochs,
+        hidden_units=args.PPO_hidden,
+        scope="PPO",
+    )
+
+if "RA-DDQN" in args.Baselines:
+    brainRA = DuelingDoubleDQN(env.actionNum, env.s_features, hidden_units=args.Dqn_hidden, scope="RA_DDQN")
 
 global_step = 0
-my_learn_step = 0
-DQN_Reward_list = []
-My_reward_list = []
-for episode in range(args.Epoch):
 
+for episode in range(args.Epoch):
     print('----------------------------Episode', episode, '----------------------------')
-    request_c = 1  # request counter
-    time_period = 1  # time period counter
-    BLOR_c = 1  # BLOR update counter
+    request_c = 1
+    time_period = 1
+    BLOR_c = 1
     performance_c = 0
-    env.reset(args)  # attention: whether generate new workload, if yes, don't forget to modify reset() function
+
+    env.reset(args)
     env.reset_reputation_factors()
     env.initial_reputation()
-    performance_respTs = []
-    brainRL.reward_list.clear()
-    while True:
-        # update reputation
-        if request_c % 60 == 0:
-            time_period += 1
-            # random policy
-            reputation_attributes_RAN = env.get_reputation_factors(1)
-            env.update_reputation(reputation_attributes_RAN, time_period, 1)
-            # round robin policy
-            reputation_attributes_RR = env.get_reputation_factors(2)
-            env.update_reputation(reputation_attributes_RR, time_period, 2)
-            # earliest policy
-            reputation_attributes_early = env.get_reputation_factors(3)
-            env.update_reputation(reputation_attributes_early, time_period, 3)
-            # DQN policy
-            reputation_attributes_DQN = env.get_reputation_factors(4)
-            env.update_reputation(reputation_attributes_DQN, time_period, 4)
-            # PSG policy
-            reputation_attributes_PSG = env.get_reputation_factors(7)
-            env.update_reputation(reputation_attributes_PSG, time_period, 7)
 
+    has_last_dqn = False
+    has_last_ppo = False
+    has_last_ra = False
+
+    if brainDQN is not None:
+        brainDQN.reward_list.clear()
+    if brainPPO is not None:
+        brainPPO.reward_list.clear()
+    if brainRA is not None:
+        brainRA.reward_list.clear()
+
+    while True:
+        # Update reputation every Time_Period_Size requests.
+        if request_c % args.Time_Period_Size == 0:
+            time_period += 1
+            for policy_name in args.Baselines:
+                reputation_attributes = env.get_reputation_factors(policy_name)
+                env.update_reputation(reputation_attributes, time_period, policy_name)
             env.reset_reputation_factors()
 
-        # baseline DQN
         global_step += 1
         finish, request_attrs = env.workload(request_c)
-        DQN_state = env.getState(request_attrs, 4)
-        if global_step != 1:
-                brainRL.store_transition(last_state, last_action, last_reward, DQN_state)
-        action_DQN = brainRL.choose_action(DQN_state)  # choose action
-        reward_DQN = env.feedback(request_attrs, action_DQN, 4)
-        # DQN_Reward_Training.append(reward_DQN)
-        if episode==1:
-            DQN_Reward_list.append(reward_DQN)
-        if (global_step > args.Dqn_start_learn) and (global_step % args.Dqn_learn_interval == 0):  # learn
-            brainRL.learn()
-        last_state = DQN_state
-        last_action = action_DQN
-        last_reward = reward_DQN
 
-        # random policy
-        state_Ran = env.getState(request_attrs, 1)
-        action_random = brainOthers.random_choose_action()
-        reward_random = env.feedback(request_attrs, action_random, 1)
-        # round robin policy
-        state_RR = env.getState(request_attrs, 2)
-        action_RR = brainOthers.RR_choose_action(request_c)
-        reward_RR = env.feedback(request_attrs, action_RR, 2)
-        # earliest policy
-        idleTimes = env.get_oracle_idleT(3)  # get oracle state
-        action_early = brainOthers.early_choose_action(idleTimes)
-        reward_early = env.feedback(request_attrs, action_early, 3)
-        # BLOR policy
-        # adopt round-robin policy to initialize BLOR factors at time period 1
-        start_counter = (BLOR_c - 1) * 200
-        RR_counter = start_counter + 15
-        end_counter = BLOR_c * 200
-        if request_c > start_counter and request_c < RR_counter + 1:
-            state_BLOR = env.getState(request_attrs, 6)
-            action_BLOR = brainOthers.RR_choose_action(request_c)
-            reward_BLOR = env.feedback(request_attrs, action_BLOR, 6)
-        elif request_c > RR_counter and request_c <  end_counter + 1:
-            request_num_BLOR = env.get_request_num(6)
-            success_num_BLOR = env.get_successful_validation(6)
-            failure_num_BLOR = request_num_BLOR - success_num_BLOR
-            brainBLOR = BLOR(success_num_BLOR, failure_num_BLOR, env.oracleCost)
-            oracles_BLOR = brainBLOR.get_oracles(success_num_BLOR, failure_num_BLOR, env.oracleCost)
-            action_BLOR = brainBLOR.choose_action(oracles_BLOR)
-            reward_BLOR = env.feedback(request_attrs, action_BLOR, 6)
-        if request_c % 200 == 0:
-            env.reset_reputation_factors_BLOR()
-            BLOR_c += 1
-        # semiGreedy policy
-        rewards_PSG, cost_PSG = env.feedback_PSG_FWA(request_attrs, 7)  # get oracle state
-        action_PSG = brainOthers.PSG_choose_action(rewards_PSG, cost_PSG)
-        reward_PSG = env.feedback(request_attrs, action_PSG, 7)
+        # Random policy.
+        if "Random" in args.Baselines:
+            action_random = brainOthers.random_choose_action()
+            env.feedback(request_attrs, action_random, "Random")
 
+        # Round-Robin policy.
+        if "Round-Robin" in args.Baselines:
+            action_RR = brainOthers.RR_choose_action(request_c)
+            env.feedback(request_attrs, action_RR, "Round-Robin")
+
+        # Earliest policy.
+        if "Earliest" in args.Baselines:
+            idle_times = env.get_oracle_idleT("Earliest")
+            action_early = brainOthers.early_choose_action(idle_times)
+            env.feedback(request_attrs, action_early, "Earliest")
+
+        # DQN / original TCO-DRL.
+        if brainDQN is not None:
+            dqn_state = env.getState(request_attrs, "DQN")
+            if has_last_dqn:
+                brainDQN.store_transition(last_dqn_state, last_dqn_action, last_dqn_reward, dqn_state)
+            action_DQN = brainDQN.choose_action(dqn_state)
+            reward_DQN = env.feedback(request_attrs, action_DQN, "DQN")
+            if (global_step > args.Dqn_start_learn) and (global_step % args.Dqn_learn_interval == 0):
+                brainDQN.learn()
+            last_dqn_state = dqn_state
+            last_dqn_action = action_DQN
+            last_dqn_reward = reward_DQN
+            has_last_dqn = True
+
+        # BLOR policy.
+        if "BLOR" in args.Baselines:
+            start_counter = (BLOR_c - 1) * 200
+            RR_counter = start_counter + min(15, env.actionNum)
+            end_counter = BLOR_c * 200
+            if request_c > start_counter and request_c < RR_counter + 1:
+                action_BLOR = brainOthers.RR_choose_action(request_c)
+            elif request_c > RR_counter and request_c < end_counter + 1:
+                request_num_BLOR = env.get_request_num("BLOR")
+                success_num_BLOR = env.get_successful_validation("BLOR")
+                failure_num_BLOR = np.maximum(request_num_BLOR - success_num_BLOR, 0)
+                brainBLOR = BLOR(success_num_BLOR, failure_num_BLOR, env.oracleCost)
+                oracles_BLOR = brainBLOR.get_oracles(success_num_BLOR, failure_num_BLOR, env.oracleCost)
+                action_BLOR = brainBLOR.choose_action(oracles_BLOR)
+            else:
+                action_BLOR = brainOthers.RR_choose_action(request_c)
+            env.feedback(request_attrs, action_BLOR, "BLOR")
+            if request_c % 200 == 0:
+                env.reset_reputation_factors_BLOR()
+                BLOR_c += 1
+
+        # SemiGreedy policy.
+        if "SemiGreedy" in args.Baselines:
+            rewards_PSG, cost_PSG = env.feedback_PSG_FWA(request_attrs, "SemiGreedy")
+            action_PSG = brainOthers.PSG_choose_action(rewards_PSG, cost_PSG)
+            env.feedback(request_attrs, action_PSG, "SemiGreedy")
+
+        # PPO policy.
+        if brainPPO is not None:
+            ppo_state = env.getState(request_attrs, "PPO")
+            if has_last_ppo:
+                brainPPO.store_transition(last_ppo_state, last_ppo_action, last_ppo_reward, last_ppo_prob)
+            action_PPO, prob_PPO = brainPPO.choose_action(ppo_state)
+            reward_PPO = env.feedback(request_attrs, action_PPO, "PPO")
+            if (global_step > args.PPO_start_learn) and (global_step % args.PPO_learn_interval == 0):
+                brainPPO.learn()
+            last_ppo_state = ppo_state
+            last_ppo_action = action_PPO
+            last_ppo_reward = reward_PPO
+            last_ppo_prob = prob_PPO
+            has_last_ppo = True
+
+        # Optional RA-DDQN policy.
+        if brainRA is not None:
+            ra_state = env.getState(request_attrs, "RA-DDQN")
+            if has_last_ra:
+                brainRA.store_transition(last_ra_state, last_ra_action, last_ra_reward, ra_state)
+            action_RA = brainRA.choose_action(ra_state)
+            reward_RA = env.feedback(request_attrs, action_RA, "RA-DDQN")
+            if (global_step > args.RA_start_learn) and (global_step % args.RA_learn_interval == 0):
+                brainRA.learn()
+            last_ra_state = ra_state
+            last_ra_action = action_RA
+            last_ra_reward = reward_RA
+            has_last_ra = True
 
         if request_c % 500 == 0:
-            acc_Rewards = env.get_accumulateRewards(args.Baseline_num, performance_c, request_c)
-            cost = env.get_accumulateCost(args.Baseline_num, performance_c, request_c)
-            finishTs = env.get_FinishTimes(args.Baseline_num, performance_c, request_c)
-            avg_exeTs = env.get_executeTs(args.Baseline_num, performance_c, request_c)
-            avg_waitTs = env.get_waitTs(args.Baseline_num, performance_c, request_c)
-            avg_respTs = env.get_responseTs(args.Baseline_num, performance_c, request_c)
-            performance_respTs.append(avg_respTs)
-            successTs = env.get_successTimes(args.Baseline_num, performance_c, request_c)
-            successInTime = env.get_successInTime(args.Baseline_num, performance_c, request_c)
+            # Keep these calls for compatibility with the original code, even if the values are not printed here.
+            env.get_accumulateRewards(args.Baseline_num, performance_c, request_c)
+            env.get_accumulateCost(args.Baseline_num, performance_c, request_c)
+            env.get_FinishTimes(args.Baseline_num, performance_c, request_c)
+            env.get_executeTs(args.Baseline_num, performance_c, request_c)
+            env.get_waitTs(args.Baseline_num, performance_c, request_c)
+            env.get_responseTs(args.Baseline_num, performance_c, request_c)
+            env.get_successTimes(args.Baseline_num, performance_c, request_c)
+            env.get_successInTime(args.Baseline_num, performance_c, request_c)
             performance_c = request_c
 
         request_c += 1
         if finish:
             break
 
-    # episode performance
-    startP = 2000
+    # Avoid out-of-bounds when Request_Num <= 2000.
+    startP = min(2000, max(0, args.Request_Num // 2))
 
     total_Rewards = env.get_totalRewards(args.Baseline_num, startP)
     avg_allRespTs = env.get_total_responseTs(args.Baseline_num, startP)
@@ -147,58 +212,65 @@ for episode in range(args.Epoch):
     total_success_time = env.get_totalSuccessInTime(args.Baseline_num, startP)
     total_Ts = env.get_totalTimes(args.Baseline_num, startP)
     total_cost = env.get_totalCost(args.Baseline_num, startP)
-    print('total performance (after 2000 requests):')
-    for i in range(len(args.Baselines)):
-        name = "[" + args.Baselines[i] + "]"
-        print(name + " reward:", total_Rewards[i], ' avg_responseT:', avg_allRespTs[i],
-              'success_rate:', total_success[i], 'success_time_rate:', total_success_time[i], ' finishT:', total_Ts[i], 'Cost:', total_cost[i])
+
+    print(f'total performance (after {startP} requests):')
+    for i, name in enumerate(args.Baselines):
+        print(
+            f"[{name}] reward:", total_Rewards[i],
+            ' avg_responseT:', avg_allRespTs[i],
+            'success_rate:', total_success[i],
+            'success_time_rate:', total_success_time[i],
+            ' finishT:', total_Ts[i],
+            'Cost:', total_cost[i],
+        )
 
     if episode != 0:
-        performance_lamda[:] += env.get_total_responseTs(args.Baseline_num, 0)
-        performance_total_rewards[:] += env.get_totalRewards(args.Baseline_num, 0)
-        performance_success[:] += env.get_totalSuccess(args.Baseline_num, 0)
-        performance_success_time[:] += env.get_totalSuccessInTime(args.Baseline_num, 0)
-        performance_finishT[:] += env.get_totalTimes(args.Baseline_num, 0)
+        performance_lamda += env.get_total_responseTs(args.Baseline_num, 0)
+        performance_total_rewards += env.get_totalRewards(args.Baseline_num, 0)
+        performance_success += env.get_totalSuccess(args.Baseline_num, 0)
+        performance_success_time += env.get_totalSuccessInTime(args.Baseline_num, 0)
+        performance_finishT += env.get_totalTimes(args.Baseline_num, 0)
         performance_cost += env.get_totalCost(args.Baseline_num, 0)
         performance_match += env.get_totalMatchRate(args.Baseline_num)
-        performance_assigned_malicious_num[:] += env.get_totalMaliciousNum(args.Baseline_num)
-        performance_assigned_normal_num[:] += env.get_totalNormalNum(args.Baseline_num)
-        performance_assigned_trusted_num[:] += env.get_totalTrustedNum(args.Baseline_num)
+        performance_assigned_malicious_num += env.get_totalMaliciousNum(args.Baseline_num)
+        performance_assigned_normal_num += env.get_totalNormalNum(args.Baseline_num)
+        performance_assigned_trusted_num += env.get_totalTrustedNum(args.Baseline_num)
 
-    if episode == 0:
-        # plot DQN convergence curves
+    if episode == 0 and brainDQN is not None and len(brainDQN.reward_list) > 0:
         sns.set_style("darkgrid")
         window_size = 30
-        # calculate moving average reward
-        rewards_series = pd.Series(brainRL.reward_list)
+        rewards_series = pd.Series(brainDQN.reward_list)
         moving_avg_rewards = rewards_series.rolling(window=window_size).mean()
         plt.figure(figsize=(10, 6))
-        plt.plot(brainRL.reward_list, label='reward')
-        plt.plot(moving_avg_rewards, label='ma reward', color='darkorange')
+        plt.plot(brainDQN.reward_list, label='DQN reward')
+        plt.plot(moving_avg_rewards, label='moving average reward', color='darkorange')
         plt.xlabel('Training Steps')
         plt.ylabel('Reward')
         plt.grid(True)
         plt.legend()
         plt.savefig(f'./output/reward_episode{episode}.pdf', dpi=600)
-        plt.show()
+        plt.close()
 
 print('---------------------------- Final results ----------------------------')
-performance_lamda = np.around(performance_lamda/(args.Epoch-1), 3)
-performance_total_rewards = np.around(performance_total_rewards/(args.Epoch-1), 3)
-performance_success = np.around(performance_success/(args.Epoch-1), 3)
-performance_success_time = np.around(performance_success_time/(args.Epoch-1), 3)
-performance_finishT = np.around(performance_finishT/(args.Epoch-1), 3)
-performance_cost = np.around(performance_cost/(args.Epoch-1), 5)
-performance_match = np.around(performance_match/(args.Epoch-1), 3)
-performance_assigned_malicious_num = np.around(performance_assigned_malicious_num/(args.Epoch-1), 0)
-performance_assigned_normal_num = np.around(performance_assigned_normal_num/(args.Epoch-1), 0)
-performance_assigned_trusted_num = np.around(performance_assigned_trusted_num/(args.Epoch-1), 0)
+divisor = max(args.Epoch - 1, 1)
+performance_lamda = np.around(performance_lamda / divisor, 3)
+performance_total_rewards = np.around(performance_total_rewards / divisor, 3)
+performance_success = np.around(performance_success / divisor, 3)
+performance_success_time = np.around(performance_success_time / divisor, 3)
+performance_finishT = np.around(performance_finishT / divisor, 3)
+performance_cost = np.around(performance_cost / divisor, 5)
+performance_match = np.around(performance_match / divisor, 3)
+performance_assigned_malicious_num = np.around(performance_assigned_malicious_num / divisor, 0)
+performance_assigned_normal_num = np.around(performance_assigned_normal_num / divisor, 0)
+performance_assigned_trusted_num = np.around(performance_assigned_trusted_num / divisor, 0)
+
+print('method order:')
+print(args.Baselines)
 print('avg_responseT:')
 print(performance_lamda)
 print('total_rewards:')
 print(performance_total_rewards)
 print('success_rate:')
-
 print(performance_success)
 print('success_time_rate:')
 print(performance_success_time)
@@ -214,87 +286,3 @@ print('requests assigned to normal oracle:')
 print(performance_assigned_normal_num)
 print('requests assigned to trusted oracle:')
 print(performance_assigned_trusted_num)
-
-# # plot DQN reputations curve
-# plt.figure(figsize=(12, 8))
-# for i in range(env.DQN_oracle_reputation_history.shape[1]):
-#     plt.plot(np.arange(env.DQN_oracle_reputation_history.shape[0]), env.DQN_oracle_reputation_history[:, i], label=f'Oracle {i}')
-# min_val = np.around(np.min(env.DQN_oracle_reputation_history) - 1, 0)
-# max_val = np.around(np.max(env.DQN_oracle_reputation_history) + 1, 0)
-# plt.yticks(np.arange(min_val, max_val, 1))
-# plt.xlabel('Time Period')
-# plt.ylabel('Reputation')
-# plt.legend()
-# plt.savefig(f'./output/reputation_episode{episode}.pdf', dpi=600)
-# plt.show()
-#
-# # plot DQN reputations curve without malicious oracles
-# plt.figure(figsize=(12, 8))
-# malicious_oracles_index = [0, 5, 10]
-# # delete malicious oracles
-# data_remaining = np.delete(env.DQN_oracle_reputation_history, malicious_oracles_index, axis=1)
-# remaining_columns = [i for i in range(env.DQN_oracle_reputation_history.shape[1]) if i not in malicious_oracles_index]
-# plt.figure(figsize=(12, 8))
-# x = np.arange(data_remaining.shape[0])
-# for i, col in enumerate(remaining_columns):
-#     y = data_remaining[:, i]
-#     spline = make_interp_spline(x, y)
-#     x_smooth = np.linspace(x.min(), x.max(), 300)
-#     y_smooth = spline(x_smooth)
-#     plt.plot(x_smooth, y_smooth, label=f'Oracle {col}')
-#
-# plt.xlabel('Time Period')
-# plt.ylabel('Reputation')
-# plt.legend()
-# plt.savefig(f'./output/reputation_without_malicious_oracles_episode{episode}.pdf', dpi=600)
-# plt.show()
-#
-# # plot DQN reputations curve in one type
-# plt.figure(figsize=(12, 8))
-# malicious_oracles_index = [0,5,6,7,8,9,10,11,12,13,14]
-# # delete malicious oracles
-# data_remaining = np.delete(env.DQN_oracle_reputation_history, malicious_oracles_index, axis=1)
-# remaining_columns = [i for i in range(env.DQN_oracle_reputation_history.shape[1]) if i not in malicious_oracles_index]
-# plt.figure(figsize=(12, 8))
-# x = np.arange(data_remaining.shape[0])
-# for i, col in enumerate(remaining_columns):
-#     y = data_remaining[:, i]
-#     spline = make_interp_spline(x, y)
-#     x_smooth = np.linspace(x.min(), x.max(), 300)
-#     y_smooth = spline(x_smooth)
-#     plt.plot(x_smooth, y_smooth, label=f'Oracle {col}')
-# min_val = np.around(np.min(data_remaining) - 3, 0)
-# max_val = np.around(np.max(data_remaining) + 1, 0)
-# plt.yticks(np.arange(min_val, max_val, 0.5))
-# plt.xlabel('Time Period')
-# plt.ylabel('Reputation')
-# plt.legend()
-# plt.savefig(f'./output/reputation_in_one_type_episode{episode}.pdf', dpi=600)
-# plt.show()
-#
-#
-# # plot DQN request num
-# plt.figure(figsize=(10, 6))
-# request_num_DQN = env.DQN_oracle_events[1]
-# plt.bar(np.arange(len(request_num_DQN)), request_num_DQN, color='steelblue')
-#
-# plt.xlabel('Oracle ID')
-# plt.ylabel('Request Number')
-# plt.xticks(np.arange(len(request_num_DQN)))
-# plt.savefig(f'./output/request_num_episode{episode}.pdf', dpi=600)
-# plt.show()
-print('')
-
-'''
-reward_index = [0, 999, 1999, 2999, 3999, 4999, 5999, 6999, 7999]
-DQN_Reward_Reuslt = []
-AIRL_Reward_Result = []
-print(DQN_Reward_list)
-for t in range(len(reward_index) - 1):
-    DQN_r = sum(DQN_Reward_list[reward_index[t]: reward_index[t+1]])
-    AIRL_r = sum(My_reward_list[reward_index[t]: reward_index[t+1]])
-    DQN_Reward_Reuslt.append(DQN_r)
-    AIRL_Reward_Result.append(AIRL_r)
-print(DQN_Reward_Reuslt)
-print(AIRL_Reward_Result)
-'''
