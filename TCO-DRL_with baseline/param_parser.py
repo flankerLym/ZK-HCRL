@@ -101,4 +101,96 @@ def parameter_parser():
                         type=float,
                         default=7.0,
                         help="Deadline time of each requests")
-    return parser.parse_args()
+
+    parser.add_argument("--Oracles_Per_Type",
+                        type=int,
+                        default=5,
+                        help="Number of oracles for each service type. Total Oracle_Num = 3 * Oracles_Per_Type.")
+
+    args = parser.parse_args()
+
+    # 自动生成 Oracle 参数
+    # 原始每 5 个 oracle 的角色模式：
+    # 0: malicious, 1: trusted, 2: normal, 3: trusted, 4: trusted
+    role_pattern = ["malicious", "trusted_low", "normal", "trusted_mid", "trusted_high"]
+
+    oracle_type = []
+    oracle_cost = []
+    oracle_acc = []
+    oracle_tokens = []
+    oracle_behavior_probs = []
+    oracle_validation_probs = []
+
+    malicious_index = []
+    normal_index = []
+    trusted_index = []
+
+    service_type_num = 3
+    idx = 0
+
+    for service_type in range(service_type_num):
+        for k in range(args.Oracles_Per_Type):
+            role = role_pattern[k % len(role_pattern)]
+
+            oracle_type.append(service_type)
+
+            if role == "malicious":
+                oracle_cost.append(0.3)
+                oracle_acc.append(1.0)
+                oracle_tokens.append(150)
+                oracle_behavior_probs.append([0.5, 0.25, 0.2, 0.05])
+                oracle_validation_probs.append(0.5)
+                malicious_index.append(idx)
+
+            elif role == "normal":
+                oracle_cost.append(0.6)
+                oracle_acc.append(1.1)
+                oracle_tokens.append(300)
+                oracle_behavior_probs.append([0.65, 0.2, 0.15, 0])
+                oracle_validation_probs.append(0.7)
+                normal_index.append(idx)
+
+            elif role == "trusted_low":
+                oracle_cost.append(0.3)
+                oracle_acc.append(1.0)
+                oracle_tokens.append(150)
+                oracle_behavior_probs.append([0.9, 0.1, 0, 0])
+                oracle_validation_probs.append(0.8)
+                trusted_index.append(idx)
+
+            elif role == "trusted_mid":
+                oracle_cost.append(0.6)
+                oracle_acc.append(1.1)
+                oracle_tokens.append(300)
+                oracle_behavior_probs.append([0.9, 0.1, 0, 0])
+                oracle_validation_probs.append(0.85)
+                trusted_index.append(idx)
+
+            elif role == "trusted_high":
+                oracle_cost.append(0.9)
+                oracle_acc.append(1.2)
+                oracle_tokens.append(500)
+                oracle_behavior_probs.append([0.9, 0.1, 0, 0])
+                oracle_validation_probs.append(0.95)
+                trusted_index.append(idx)
+
+            idx += 1
+
+    args.Oracle_Num = service_type_num * args.Oracles_Per_Type
+    args.Oracle_Type = oracle_type
+    args.Oracle_Cost = oracle_cost
+    args.Oracle_Acc = oracle_acc
+    args.Oracle_Tokens = oracle_tokens
+    args.Oracle_Behavior_Probs = oracle_behavior_probs
+    args.Oracle_Validation_Probs = oracle_validation_probs
+
+    args.Malicious_Oracle_Index = malicious_index
+    args.Normal_Oracle_Index = normal_index
+    args.Trusted_Oracle_Index = trusted_index
+
+    print("Generated Oracle_Num:", args.Oracle_Num)
+    print("Malicious oracles:", args.Malicious_Oracle_Index)
+    print("Normal oracles:", args.Normal_Oracle_Index)
+    print("Trusted oracles:", args.Trusted_Oracle_Index)
+
+    return args

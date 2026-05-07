@@ -22,7 +22,9 @@ class SchedulingEnv:
         self.oracleToken = args.Oracle_Tokens
         self.oracleBehaviorProbs = args.Oracle_Behavior_Probs
         self.oracleValidationProbs = args.Oracle_Validation_Probs
-
+        self.malicious_oracles = args.Malicious_Oracle_Index
+        self.normal_oracles = args.Normal_Oracle_Index
+        self.trusted_oracles = args.Trusted_Oracle_Index
         # Request Setting
         self.requestMI = args.Request_len_Mean
         self.requestMI_std = args.Request_len_Std
@@ -123,7 +125,9 @@ class SchedulingEnv:
         self.ddl = args.Request_ddl
         self.gen_workload(args.lamda)
         self.oracleTypes = args.Oracle_Type
-
+        self.malicious_oracles = args.Malicious_Oracle_Index
+        self.normal_oracles = args.Normal_Oracle_Index
+        self.trusted_oracles = args.Trusted_Oracle_Index
         self.timewindowSize = args.Time_Window_Size
         self.timeperiodSize = args.Time_Period_Size
         self.timeperiodNum = int(args.Request_Num / args.Time_Period_Size) + 1
@@ -233,7 +237,7 @@ class SchedulingEnv:
             waitT = idleT - arrival_time
             startT = idleT
         # malicious oracle affect exeT
-        if action in [0, 5, 10]:
+        if action in self.malicious_oracles:
             exe_time = (length * 1.05) / acc
         else:
             exe_time = exeT
@@ -440,7 +444,7 @@ class SchedulingEnv:
             exeT = length / acc[action]
 
             # malicious oracle affect exeT
-            if action in [0, 5, 10]:
+            if action in self.malicious_oracles:
                 exe_time = (length * 1.05) / acc[action]
             else:
                 exe_time = exeT
@@ -937,36 +941,41 @@ class SchedulingEnv:
 
     def get_totalMaliciousNum(self, policies):
         num = np.zeros(policies)
-        maliciousOracleIndex = [0, 5, 10]
+        maliciousOracleIndex = self.malicious_oracles
+
         num[0] = np.sum(self.RAN_oracle_events[1, maliciousOracleIndex])
         num[1] = np.sum(self.RR_oracle_events[1, maliciousOracleIndex])
         num[2] = np.sum(self.early_oracle_events[1, maliciousOracleIndex])
         num[3] = np.sum(self.DQN_oracle_events[1, maliciousOracleIndex])
         num[4] = np.sum(self.BLOR_oracle_events[1, maliciousOracleIndex])
         num[5] = np.sum(self.PSG_oracle_events[1, maliciousOracleIndex])
+
         return np.around(num, 1)
 
     def get_totalNormalNum(self, policies):
         num = np.zeros(policies)
-        # normalOracleIndex = [2, 7, 12]
-        normalOracleIndex = [2, 7, 12]
+        normalOracleIndex = self.normal_oracles
+
         num[0] = np.sum(self.RAN_oracle_events[1, normalOracleIndex])
         num[1] = np.sum(self.RR_oracle_events[1, normalOracleIndex])
         num[2] = np.sum(self.early_oracle_events[1, normalOracleIndex])
         num[3] = np.sum(self.DQN_oracle_events[1, normalOracleIndex])
         num[4] = np.sum(self.BLOR_oracle_events[1, normalOracleIndex])
         num[5] = np.sum(self.PSG_oracle_events[1, normalOracleIndex])
+
         return np.around(num, 1)
 
     def get_totalTrustedNum(self, policies):
         num = np.zeros(policies)
-        trustedOracleIndex = [1, 3, 4, 6, 8, 9, 11, 13, 14]
+        trustedOracleIndex = self.trusted_oracles
+
         num[0] = np.sum(self.RAN_oracle_events[1, trustedOracleIndex])
         num[1] = np.sum(self.RR_oracle_events[1, trustedOracleIndex])
         num[2] = np.sum(self.early_oracle_events[1, trustedOracleIndex])
         num[3] = np.sum(self.DQN_oracle_events[1, trustedOracleIndex])
         num[4] = np.sum(self.BLOR_oracle_events[1, trustedOracleIndex])
         num[5] = np.sum(self.PSG_oracle_events[1, trustedOracleIndex])
+
         return np.around(num, 1)
 
 
