@@ -59,6 +59,7 @@ if "DQN" in args.Baselines:
         batch_size=args.Dqn_batch_size,
         e_greedy_increment=args.Dqn_epsilon_increment,
         reward_clip=args.Reward_Clip,
+        seed=args.Seed,
     )
 
 if "PPO" in args.Baselines:
@@ -69,6 +70,7 @@ if "PPO" in args.Baselines:
         update_epochs=args.PPO_update_epochs,
         hidden_units=args.PPO_hidden,
         scope="PPO",
+        seed=args.Seed,
     )
 
 if "RA-DDQN" in args.Baselines:
@@ -81,9 +83,13 @@ if "RA-DDQN" in args.Baselines:
         batch_size=args.Dqn_batch_size,
         e_greedy_increment=args.Dqn_epsilon_increment,
         reward_clip=args.Reward_Clip,
+        seed=args.Seed,
     )
 
 global_step = 0
+# Use one consistent evaluation window for per-episode and final summaries.
+# This excludes the warm-up/exploration prefix when Request_Num is small.
+eval_start = min(2000, max(0, args.Request_Num // 2))
 
 for episode in range(args.Epoch):
     print('----------------------------Episode', episode, '----------------------------')
@@ -138,9 +144,9 @@ for episode in range(args.Epoch):
         # DQN / original TCO-DRL.
         if brainDQN is not None:
             dqn_state = env.getState(request_attrs, "DQN")
-            if has_last_dqn:
-                brainDQN.store_transition(last_dqn_state, last_dqn_action, last_dqn_reward, dqn_state)
             dqn_mask = env.get_action_mask(request_attrs)
+            if has_last_dqn:
+                brainDQN.store_transition(last_dqn_state, last_dqn_action, last_dqn_reward, dqn_state, dqn_mask)
             action_DQN = brainDQN.choose_action(dqn_state, dqn_mask)
             reward_DQN = env.feedback(request_attrs, action_DQN, "DQN")
             if (global_step > args.Dqn_start_learn) and (global_step % args.Dqn_learn_interval == 0):
@@ -197,9 +203,9 @@ for episode in range(args.Epoch):
         # Optional RA-DDQN policy.
         if brainRA is not None:
             ra_state = env.getState(request_attrs, "RA-DDQN")
-            if has_last_ra:
-                brainRA.store_transition(last_ra_state, last_ra_action, last_ra_reward, ra_state)
             ra_mask = env.get_action_mask(request_attrs)
+            if has_last_ra:
+                brainRA.store_transition(last_ra_state, last_ra_action, last_ra_reward, ra_state, ra_mask)
             action_RA = brainRA.choose_action(ra_state, ra_mask)
             reward_RA = env.feedback(request_attrs, action_RA, "RA-DDQN")
             if (global_step > args.RA_start_learn) and (global_step % args.RA_learn_interval == 0):
@@ -225,8 +231,8 @@ for episode in range(args.Epoch):
         if finish:
             break
 
-    # Avoid out-of-bounds when Request_Num <= 2000.
-    startP = min(2000, max(0, args.Request_Num // 2))
+    # Use the same evaluation window as the final summary.
+    startP = eval_start
 
     total_Rewards = env.get_totalRewards(args.Baseline_num, startP)
     avg_allRespTs = env.get_total_responseTs(args.Baseline_num, startP)
@@ -247,16 +253,16 @@ for episode in range(args.Epoch):
         )
 
     if episode != 0:
-        performance_lamda += env.get_total_responseTs(args.Baseline_num, 0)
-        performance_total_rewards += env.get_totalRewards(args.Baseline_num, 0)
-        performance_success += env.get_totalSuccess(args.Baseline_num, 0)
-        performance_success_time += env.get_totalSuccessInTime(args.Baseline_num, 0)
-        performance_finishT += env.get_totalTimes(args.Baseline_num, 0)
-        performance_cost += env.get_totalCost(args.Baseline_num, 0)
-        performance_match += env.get_totalMatchRate(args.Baseline_num)
-        performance_assigned_malicious_num += env.get_totalMaliciousNum(args.Baseline_num)
-        performance_assigned_normal_num += env.get_totalNormalNum(args.Baseline_num)
-        performance_assigned_trusted_num += env.get_totalTrustedNum(args.Baseline_num)
+        performance_lamda += env.get_total_responseTs(args.Baseline_num, eval_start)
+        performance_total_rewards += env.get_totalRewards(args.Baseline_num, eval_start)
+        performance_success += env.get_totalSuccess(args.Baseline_num, eval_start)
+        performance_success_time += env.get_totalSuccessInTime(args.Baseline_num, eval_start)
+        performance_finishT += env.get_totalTimes(args.Baseline_num, eval_start)
+        performance_cost += env.get_totalCost(args.Baseline_num, eval_start)
+        performance_match += env.get_totalMatchRate(args.Baseline_num, eval_start)
+        performance_assigned_malicious_num += env.get_totalMaliciousNum(args.Baseline_num, eval_start)
+        performance_assigned_normal_num += env.get_totalNormalNum(args.Baseline_num, eval_start)
+        performance_assigned_trusted_num += env.get_totalTrustedNum(args.Baseline_num, eval_start)
 
     if episode == 0 and brainDQN is not None and len(brainDQN.reward_list) > 0:
         sns.set_style("darkgrid")

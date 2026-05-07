@@ -20,7 +20,7 @@ class baseline_DQN:
     This class keeps the public API of the original TensorFlow DQN used by main.py:
       - choose_action(observation, action_mask=None)
       - choose_best_action(observation, action_mask=None)
-      - store_transition(s, a, r, s_)
+      - store_transition(s, a, r, s_, next_action_mask=None)
       - learn()
 
     It replaces TensorFlow with a small NumPy MLP to avoid native crashes on
@@ -145,12 +145,21 @@ class baseline_DQN:
             return Q, (X, Z1, H)
         return Q
 
-    def store_transition(self, s, a, r, s_):
+    def store_transition(self, s, a, r, s_, next_action_mask=None):
+        """Store one transition.
+
+        next_action_mask is important when Action_Mask_Mode='type'. The agent
+        selects only valid same-type oracle actions at execution time, so the
+        Bellman target must also maximize only over valid actions in the next
+        state. Without this, Q-learning can overestimate invalid actions that
+        will never be executable.
+        """
         self.replay_buffer.append((
             self._sanitize_state(s),
             int(a),
             float(np.clip(r, -self.reward_clip, self.reward_clip)),
             self._sanitize_state(s_),
+            self._sanitize_mask(next_action_mask),
         ))
 
     def choose_action(self, observation, action_mask=None):
@@ -191,14 +200,19 @@ class baseline_DQN:
         A = np.asarray([d[1] for d in minibatch], dtype=np.int32)
         R = np.asarray([d[2] for d in minibatch], dtype=np.float32)
         S2 = np.asarray([d[3] for d in minibatch], dtype=np.float32)
+        next_masks = np.asarray([d[4] for d in minibatch], dtype=bool)
 
         q_next_t = self._forward(S2, target=True)
+        # Apply the next-state valid-action mask to the Bellman target. This
+        # makes training consistent with masked execution in choose_action().
+        masked_q_next_t = np.where(next_masks, q_next_t, -1e9)
         if self.double_dqn:
             q_next_eval = self._forward(S2, target=False)
-            best_next = np.argmax(q_next_eval, axis=1)
+            masked_q_next_eval = np.where(next_masks, q_next_eval, -1e9)
+            best_next = np.argmax(masked_q_next_eval, axis=1)
             y = R + self.gamma * q_next_t[np.arange(self.batch_size), best_next]
         else:
-            y = R + self.gamma * np.max(q_next_t, axis=1)
+            y = R + self.gamma * np.max(masked_q_next_t, axis=1)
         y = np.clip(np.nan_to_num(y, nan=0.0, posinf=self.reward_clip, neginf=-self.reward_clip), -self.reward_clip, self.reward_clip)
 
         q, cache = self._forward(S, target=False, return_cache=True)

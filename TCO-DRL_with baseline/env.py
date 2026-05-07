@@ -527,20 +527,34 @@ class SchedulingEnv:
     def get_totalRewards(self, policies, start):
         return np.around(self._metric_array(lambda n: np.sum(self.events[n][5, start:self.requestNum])), 3)
 
-    def get_totalMaliciousNum(self, policies):
+    def _assigned_count_from_events(self, policy_name, oracle_indices, start=0):
+        start = min(max(int(start), 0), self.requestNum - 1)
+        chosen = self.events[policy_name][0, start:self.requestNum].astype(int)
+        return float(np.sum(np.isin(chosen, oracle_indices)))
+
+    def get_totalMaliciousNum(self, policies, start=0):
         idx = self.malicious_oracles
-        return np.around(self._metric_array(lambda n: np.sum(self.oracle_events[n][1, idx])), 1)
+        return np.around(self._metric_array(lambda n: self._assigned_count_from_events(n, idx, start)), 1)
 
-    def get_totalNormalNum(self, policies):
+    def get_totalNormalNum(self, policies, start=0):
         idx = self.normal_oracles
-        return np.around(self._metric_array(lambda n: np.sum(self.oracle_events[n][1, idx])), 1)
+        return np.around(self._metric_array(lambda n: self._assigned_count_from_events(n, idx, start)), 1)
 
-    def get_totalTrustedNum(self, policies):
+    def get_totalTrustedNum(self, policies, start=0):
         idx = self.trusted_oracles
-        return np.around(self._metric_array(lambda n: np.sum(self.oracle_events[n][1, idx])), 1)
+        return np.around(self._metric_array(lambda n: self._assigned_count_from_events(n, idx, start)), 1)
 
-    def get_totalMatchRate(self, policies):
-        return np.around(self._metric_array(lambda n: np.sum(self.oracle_events[n][3, :]) / max(self.requestNum, 1)), 3)
+    def get_totalMatchRate(self, policies, start=0):
+        start = min(max(int(start), 0), self.requestNum - 1)
+        denom = max(self.requestNum - start, 1)
+
+        def _match_rate(policy_name):
+            chosen = self.events[policy_name][0, start:self.requestNum].astype(int)
+            chosen_types = self.oracleTypes[chosen]
+            request_types = self.request_type[start:self.requestNum]
+            return float(np.sum(chosen_types == request_types) / denom)
+
+        return np.around(self._metric_array(_match_rate), 3)
 
     def get_totalTimes(self, policies, start):
         start_idx = min(max(start, 0), self.requestNum - 1)
