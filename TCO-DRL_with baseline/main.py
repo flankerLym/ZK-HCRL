@@ -50,7 +50,16 @@ brainPPO = None
 brainRA = None
 
 if "DQN" in args.Baselines:
-    brainDQN = baseline_DQN(env.actionNum, env.s_features, hidden_units=args.Dqn_hidden, scope="DQN")
+    brainDQN = baseline_DQN(
+        env.actionNum, env.s_features,
+        hidden_units=args.Dqn_hidden,
+        scope="DQN",
+        learning_rate=args.Dqn_lr,
+        memory_size=args.Dqn_memory_size,
+        batch_size=args.Dqn_batch_size,
+        e_greedy_increment=args.Dqn_epsilon_increment,
+        reward_clip=args.Reward_Clip,
+    )
 
 if "PPO" in args.Baselines:
     brainPPO = baseline_PPO(
@@ -63,7 +72,16 @@ if "PPO" in args.Baselines:
     )
 
 if "RA-DDQN" in args.Baselines:
-    brainRA = DuelingDoubleDQN(env.actionNum, env.s_features, hidden_units=args.Dqn_hidden, scope="RA_DDQN")
+    brainRA = DuelingDoubleDQN(
+        env.actionNum, env.s_features,
+        hidden_units=args.Dqn_hidden,
+        scope="RA_DDQN",
+        learning_rate=args.RA_lr,
+        memory_size=args.Dqn_memory_size,
+        batch_size=args.Dqn_batch_size,
+        e_greedy_increment=args.Dqn_epsilon_increment,
+        reward_clip=args.Reward_Clip,
+    )
 
 global_step = 0
 
@@ -122,7 +140,8 @@ for episode in range(args.Epoch):
             dqn_state = env.getState(request_attrs, "DQN")
             if has_last_dqn:
                 brainDQN.store_transition(last_dqn_state, last_dqn_action, last_dqn_reward, dqn_state)
-            action_DQN = brainDQN.choose_action(dqn_state)
+            dqn_mask = env.get_action_mask(request_attrs)
+            action_DQN = brainDQN.choose_action(dqn_state, dqn_mask)
             reward_DQN = env.feedback(request_attrs, action_DQN, "DQN")
             if (global_step > args.Dqn_start_learn) and (global_step % args.Dqn_learn_interval == 0):
                 brainDQN.learn()
@@ -162,8 +181,9 @@ for episode in range(args.Epoch):
         if brainPPO is not None:
             ppo_state = env.getState(request_attrs, "PPO")
             if has_last_ppo:
-                brainPPO.store_transition(last_ppo_state, last_ppo_action, last_ppo_reward, last_ppo_prob)
-            action_PPO, prob_PPO = brainPPO.choose_action(ppo_state)
+                brainPPO.store_transition(last_ppo_state, last_ppo_action, last_ppo_reward, last_ppo_prob, last_ppo_mask)
+            ppo_mask = env.get_action_mask(request_attrs)
+            action_PPO, prob_PPO = brainPPO.choose_action(ppo_state, ppo_mask)
             reward_PPO = env.feedback(request_attrs, action_PPO, "PPO")
             if (global_step > args.PPO_start_learn) and (global_step % args.PPO_learn_interval == 0):
                 brainPPO.learn()
@@ -171,6 +191,7 @@ for episode in range(args.Epoch):
             last_ppo_action = action_PPO
             last_ppo_reward = reward_PPO
             last_ppo_prob = prob_PPO
+            last_ppo_mask = ppo_mask
             has_last_ppo = True
 
         # Optional RA-DDQN policy.
@@ -178,7 +199,8 @@ for episode in range(args.Epoch):
             ra_state = env.getState(request_attrs, "RA-DDQN")
             if has_last_ra:
                 brainRA.store_transition(last_ra_state, last_ra_action, last_ra_reward, ra_state)
-            action_RA = brainRA.choose_action(ra_state)
+            ra_mask = env.get_action_mask(request_attrs)
+            action_RA = brainRA.choose_action(ra_state, ra_mask)
             reward_RA = env.feedback(request_attrs, action_RA, "RA-DDQN")
             if (global_step > args.RA_start_learn) and (global_step % args.RA_learn_interval == 0):
                 brainRA.learn()

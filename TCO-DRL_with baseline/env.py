@@ -27,6 +27,7 @@ class SchedulingEnv:
         self.oracleToken = np.array(args.Oracle_Tokens, dtype=float)
         self.oracleBehaviorProbs = np.array(args.Oracle_Behavior_Probs, dtype=float)
         self.oracleValidationProbs = np.array(args.Oracle_Validation_Probs, dtype=float)
+        self.oracleFatigueSensitivity = np.array(getattr(args, "Oracle_Fatigue_Sensitivity", [0.0] * self.oracleNum), dtype=float)
         self.malicious_oracles = list(args.Malicious_Oracle_Index)
         self.normal_oracles = list(args.Normal_Oracle_Index)
         self.trusted_oracles = list(args.Trusted_Oracle_Index)
@@ -45,8 +46,9 @@ class SchedulingEnv:
             # request type + oracle wait time + oracle reputation
             self.s_features = 1 + 2 * self.oracleNum
         else:
-            # request type, request length, ddl + wait + reputation + cost + acc + type_match + validation_prob
-            self.s_features = 3 + 6 * self.oracleNum
+            # request type, request length, ddl + wait + reputation + cost + acc +
+            # type_match + base validation prob + recent success rate + recent load
+            self.s_features = 3 + 8 * self.oracleNum
 
         # Reputation settings
         self.timewindowSize = args.Time_Window_Size
@@ -96,8 +98,22 @@ class SchedulingEnv:
               '  length SD:', round(np.std(self.lengths, ddof=1), 3))
 
         service_type_num = int(np.max(self.oracleTypes)) + 1
-        probs = [1.0 / service_type_num] * service_type_num
-        self.request_type = np.random.choice(list(range(service_type_num)), size=self.requestNum, p=probs)
+        if getattr(self.args, "Scenario", "static") in ["rl_hard", "rl_harder"]:
+            # Bursty correlated requests: a one-step greedy policy tends to repeatedly
+            # hit the same cheap same-type oracle, triggering fatigue. RL agents can
+            # observe recent load/success features and learn to distribute selections.
+            burstiness = float(getattr(self.args, "Burstiness", 0.80))
+            types = np.zeros(self.requestNum, dtype=int)
+            types[0] = np.random.randint(0, service_type_num)
+            for i in range(1, self.requestNum):
+                if np.random.rand() < burstiness:
+                    types[i] = types[i - 1]
+                else:
+                    types[i] = np.random.randint(0, service_type_num)
+            self.request_type = types
+        else:
+            probs = [1.0 / service_type_num] * service_type_num
+            self.request_type = np.random.choice(list(range(service_type_num)), size=self.requestNum, p=probs)
 
     def reset(self, args):
         self.args = args
@@ -113,6 +129,7 @@ class SchedulingEnv:
         self.oracleToken = np.array(args.Oracle_Tokens, dtype=float)
         self.oracleBehaviorProbs = np.array(args.Oracle_Behavior_Probs, dtype=float)
         self.oracleValidationProbs = np.array(args.Oracle_Validation_Probs, dtype=float)
+        self.oracleFatigueSensitivity = np.array(getattr(args, "Oracle_Fatigue_Sensitivity", [0.0] * self.oracleNum), dtype=float)
         self.malicious_oracles = list(args.Malicious_Oracle_Index)
         self.normal_oracles = list(args.Normal_Oracle_Index)
         self.trusted_oracles = list(args.Trusted_Oracle_Index)
@@ -128,7 +145,7 @@ class SchedulingEnv:
         if args.State_Mode == "original":
             self.s_features = 1 + 2 * self.oracleNum
         else:
-            self.s_features = 3 + 6 * self.oracleNum
+            self.s_features = 3 + 8 * self.oracleNum
 
         self.arrival_Times = np.zeros(self.requestNum)
         self.requestsMI = np.zeros(self.requestNum)
@@ -162,19 +179,96 @@ class SchedulingEnv:
         return (1 + 2.5 * np.exp(1.5 - cost)) * (exeT / max(durationT, 1e-8)) + reputation - 4 * penalty
 
     def _risk_aware_reward(self, reputation, match, successful_validation, cost, durationT, ddl, behavior_record):
+        """Bounded success-aligned risk-aware reward (tuned).
+
+        Design goal:
+        1) keep every one-step reward small and clipped;
+        2) align the objective with validation-aware success;
+        3) prevent RA-DDQN from becoming too conservative by over-selecting
+           expensive trusted oracles that cause queueing/timeouts.
+
+        Therefore the dominant positive term is direct task success
+        (on-time + type match + validation), while reputation is a small
+        regularizer. Cost, latency, timeout and abnormal behavior are explicit
+        penalties. This keeps reward values interpretable and avoids the
+        previous "high reward but lower success_rate" mismatch.
+        """
         args = self.args
-        timeout = 1 if durationT > ddl else 0
-        behavior_risk = np.log1p(behavior_record) / np.log1p(100)
-        normalized_response = durationT / max(ddl, 1e-8)
-        return (
-            args.W_REPUTATION * reputation
-            + args.W_MATCH * match
-            + args.W_VALIDATION * successful_validation
-            - args.W_COST * cost
-            - args.W_RESPONSE * normalized_response
-            - args.W_BEHAVIOR * behavior_risk
-            - args.W_TIMEOUT * timeout
+
+        ddl = max(float(ddl), 1e-8)
+        timeout = 1.0 if durationT > ddl else 0.0
+        on_time = 1.0 - timeout
+
+        rep_score = 0.5 * (np.tanh(float(reputation)) + 1.0)
+        match_score = float(match)
+        val_score = float(successful_validation)
+        task_success = float(match_score * val_score * on_time)
+
+        cost_score = float(np.clip(cost, 0.0, 1.25) / 1.25)
+        response_ratio = float(np.clip(durationT / ddl, 0.0, 2.5))
+        # Softer below deadline, rapidly worse after deadline.
+        response_penalty = min(response_ratio, 1.0) * 0.4 + max(response_ratio - 1.0, 0.0) * 0.9
+        response_penalty = float(np.clip(response_penalty, 0.0, 1.0))
+        behavior_risk = float(np.log1p(max(float(behavior_record), 0.0)) / np.log1p(100.0))
+
+        positive = (
+            args.W_SUCCESS * task_success
+            + args.W_VALIDATION * val_score
+            + args.W_MATCH * match_score
+            + args.W_REPUTATION * rep_score
         )
+        negative = (
+            args.W_COST * cost_score
+            + args.W_RESPONSE * response_penalty
+            + args.W_BEHAVIOR * behavior_risk
+            + args.W_TIMEOUT * timeout
+            + 0.8 * (1.0 - task_success)
+        )
+
+        normalizer = (
+            args.W_SUCCESS + args.W_VALIDATION + args.W_MATCH + args.W_REPUTATION
+            + args.W_COST + args.W_RESPONSE + args.W_BEHAVIOR + args.W_TIMEOUT
+            + 0.8
+        )
+        raw = (positive - negative) / max(normalizer, 1e-8)
+        reward = float(args.Reward_Scale * raw)
+        return float(np.clip(reward, -args.Reward_Clip, args.Reward_Clip))
+
+    def _effective_validation_prob(self, action, policy_name):
+        """Dynamic validation probability under rl_hard.
+
+        In rl_hard, low-cost bait oracles fatigue when over-used within the current
+        reputation period. This makes the environment unfavorable to one-step greedy
+        policies that always choose the cheapest matching oracle.
+        """
+        base_prob = float(self.oracleValidationProbs[action])
+        if getattr(self.args, "Scenario", "static") not in ["rl_hard", "rl_harder"]:
+            return base_prob
+        recent_assigned = float(self.reputation_factors[policy_name][0, action])
+        avg_recent = max(self.timeperiodSize / max(self.oracleNum, 1), 1e-6)
+        load_ratio = recent_assigned / avg_recent
+        # no penalty below average load. rl_harder uses a stronger delayed trap:
+        # fatigue grows faster after repeated selection during bursty traffic.
+        overload = max(0.0, load_ratio - 1.0)
+        scenario = getattr(self.args, "Scenario", "static")
+        if scenario == "rl_harder":
+            fatigue_growth = np.sqrt(overload) + 0.35 * overload
+            min_prob = 0.02
+        else:
+            fatigue_growth = np.log1p(overload)
+            min_prob = 0.05
+        fatigue = float(getattr(self.args, "Fatigue_Strength", 1.0)) * float(self.oracleFatigueSensitivity[action]) * fatigue_growth
+        return float(np.clip(base_prob - fatigue, min_prob, 0.99))
+
+    def get_action_mask(self, request_attrs):
+        """Boolean mask for type-constrained RL action space."""
+        if getattr(self.args, "Action_Mask_Mode", "none") != "type":
+            return np.ones(self.oracleNum, dtype=bool)
+        request_type = int(request_attrs[3])
+        mask = self.oracleTypes == request_type
+        if not np.any(mask):
+            mask[:] = True
+        return mask.astype(bool)
 
     def feedback(self, request_attrs, action, policy_name):
         if policy_name not in self.policy_names:
@@ -190,7 +284,7 @@ class SchedulingEnv:
         acc = self.oracleAcc[action]
         cost = self.oracleCost[action]
         oracle_type = int(self.oracleTypes[action])
-        validation_prob = self.oracleValidationProbs[action]
+        validation_prob = self._effective_validation_prob(action, policy_name)
         behavior_probs = self.oracleBehaviorProbs[action]
 
         idleT = self.oracle_events[policy_name][0, action]
@@ -280,7 +374,7 @@ class SchedulingEnv:
                 # Expected one-step risk-aware score. This gives SemiGreedy access to
                 # validation statistics; the default myopic view intentionally does not.
                 match = 1 if request_type == oracle_type else 0
-                expected_validation = self.oracleValidationProbs[action] if durationT <= request_attrs[4] else 0.0
+                expected_validation = self._effective_validation_prob(action, policy_name) if durationT <= request_attrs[4] else 0.0
                 expected_behavior = float(np.dot(self.oracleBehaviorProbs[action], np.array([0, 1, 5, 100], dtype=float)))
                 rewards[action] = self._risk_aware_reward(
                     reputation[action], match, expected_validation, self.oracleCost[action], durationT, request_attrs[4], expected_behavior
@@ -369,6 +463,17 @@ class SchedulingEnv:
             return np.hstack(([request_service], waitTimes, reputations))
 
         type_match = np.array([1 if request_service == int(t) else 0 for t in self.oracleTypes])
+        req_num = self.reputation_factors[policy_name][0]
+        val_num = self.reputation_factors[policy_name][1]
+        recent_success_rate = np.divide(val_num, np.maximum(req_num, 1), dtype=float)
+        recent_load = req_num / max(self.timeperiodSize, 1)
+        # Do not expose true validation probability by default in hard scenarios;
+        # otherwise the task becomes too easy and resembles supervised role lookup.
+        if getattr(self.args, "Expose_Validation_Prob", False):
+            validation_feature = self.oracleValidationProbs
+        else:
+            validation_feature = np.zeros(self.oracleNum, dtype=float)
+
         return np.hstack((
             [request_service, length, self.ddl],
             waitTimes,
@@ -376,7 +481,9 @@ class SchedulingEnv:
             self.oracleCost,
             self.oracleAcc,
             type_match,
-            self.oracleValidationProbs,
+            validation_feature,
+            recent_success_rate,
+            recent_load,
         ))
 
     def getStateP(self, request_id):
