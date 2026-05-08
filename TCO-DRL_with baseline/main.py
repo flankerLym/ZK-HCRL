@@ -14,6 +14,7 @@ import random
 import sys
 import atexit
 import json
+import io
 from datetime import datetime
 
 import numpy as np
@@ -27,16 +28,16 @@ from utils import get_args
 
 
 # -----------------------------------------------------------------------------
-# Automatic run logging
+# Automatic run logging and run folder
 # -----------------------------------------------------------------------------
-# Every run creates a full console log named like: 26_5_7_18_05.txt
-# Format: YY_M_D_HH_MM. This matches the user's existing log naming style.
+# Each run creates one self-contained folder:
+#   ./output/YY_M_D_HH_MM_Epoch{N}_Req{M}_{Scenario}/
+# containing:
+#   - full console log .txt
+#   - final results .csv/.json
+#   - DQN / PPO / RA-DDQN weight checkpoints .npz
+#   - reward curve pdf
 os.makedirs("./output", exist_ok=True)
-_run_now = datetime.now()
-RUN_ID = f"{_run_now.year % 100}_{_run_now.month}_{_run_now.day}_{_run_now.hour:02d}_{_run_now.minute:02d}"
-RUN_TXT_PATH = os.path.join("./output", f"{RUN_ID}.txt")
-RUN_CSV_PATH = os.path.join("./output", f"{RUN_ID}_final_results.csv")
-RUN_JSON_PATH = os.path.join("./output", f"{RUN_ID}_final_results.json")
 
 
 class Tee:
@@ -60,13 +61,39 @@ class Tee:
                 pass
 
 
+# Capture get_args() prints first, because the run folder name needs args.Epoch
+# and args.Request_Num.
+_pre_arg_stdout = sys.stdout
+_pre_arg_stderr = sys.stderr
+_pre_arg_buffer = io.StringIO()
+sys.stdout = _pre_arg_buffer
+sys.stderr = _pre_arg_buffer
+args = get_args()
+sys.stdout = _pre_arg_stdout
+sys.stderr = _pre_arg_stderr
+
+_run_now = datetime.now()
+RUN_ID = (
+    f"{_run_now.year % 100}_{_run_now.month}_{_run_now.day}_"
+    f"{_run_now.hour:02d}_{_run_now.minute:02d}_"
+    f"Epoch{args.Epoch}_Req{args.Request_Num}_{args.Scenario}"
+)
+RUN_DIR = os.path.join("./output", RUN_ID)
+os.makedirs(RUN_DIR, exist_ok=True)
+RUN_TXT_PATH = os.path.join(RUN_DIR, f"{RUN_ID}.txt")
+RUN_CSV_PATH = os.path.join(RUN_DIR, f"{RUN_ID}_final_results.csv")
+RUN_JSON_PATH = os.path.join(RUN_DIR, f"{RUN_ID}_final_results.json")
+
 _log_f = open(RUN_TXT_PATH, "w", encoding="utf-8")
 sys.stdout = Tee(sys.__stdout__, _log_f)
 sys.stderr = Tee(sys.__stderr__, _log_f)
 atexit.register(_log_f.close)
-print(f"Run log path: {RUN_TXT_PATH}")
 
-args = get_args()
+print(f"Run folder: {RUN_DIR}")
+print(f"Run log path: {RUN_TXT_PATH}")
+# Replay argument/config prints into both terminal and log.
+print(_pre_arg_buffer.getvalue(), end="")
+
 np.random.seed(args.Seed)
 random.seed(args.Seed)
 
@@ -318,7 +345,7 @@ for episode in range(args.Epoch):
         plt.ylabel('Reward')
         plt.grid(True)
         plt.legend()
-        plt.savefig(f'./output/reward_episode{episode}.pdf', dpi=600)
+        plt.savefig(os.path.join(RUN_DIR, f'{RUN_ID}_reward_episode{episode}.pdf'), dpi=600)
         plt.close()
 
 print('---------------------------- Final results ----------------------------')
@@ -373,10 +400,51 @@ final_results_df = pd.DataFrame({
 })
 final_results_df.to_csv(RUN_CSV_PATH, index=False, encoding="utf-8-sig")
 
+# Save model weights into the same run folder as the log/results.
+# Filenames include timestamp, training epochs, request count and scenario via RUN_ID.
+weight_paths = {}
+weight_metadata = {
+    "run_id": RUN_ID,
+    "epoch": int(args.Epoch),
+    "request_num": int(args.Request_Num),
+    "scenario": args.Scenario,
+    "success_mode": args.Success_Mode,
+    "state_mode": args.State_Mode,
+    "reward_mode": args.Reward_Mode,
+    "action_mask_mode": args.Action_Mask_Mode,
+    "seed": int(args.Seed),
+    "baselines": list(args.Baselines),
+    "eval_start": int(eval_start),
+}
+if brainDQN is not None:
+    weight_paths["DQN"] = brainDQN.save_model(
+        os.path.join(RUN_DIR, f"{RUN_ID}_DQN_weights.npz"),
+        metadata={**weight_metadata, "method": "DQN"},
+    )
+if brainPPO is not None:
+    weight_paths["PPO"] = brainPPO.save_model(
+        os.path.join(RUN_DIR, f"{RUN_ID}_PPO_weights.npz"),
+        metadata={**weight_metadata, "method": "PPO"},
+    )
+if brainRA is not None:
+    weight_paths["RA-DDQN"] = brainRA.save_model(
+        os.path.join(RUN_DIR, f"{RUN_ID}_RA-DDQN_weights.npz"),
+        metadata={**weight_metadata, "method": "RA-DDQN"},
+    )
+
+print('saved model weights:')
+if len(weight_paths) == 0:
+    print('No DQN/PPO/RA-DDQN model was enabled, so no weight file was saved.')
+else:
+    for method_name, path in weight_paths.items():
+        print(f"{method_name}: {path}")
+
 run_metadata = {
     "run_id": RUN_ID,
+    "run_dir": RUN_DIR,
     "log_txt": RUN_TXT_PATH,
     "final_results_csv": RUN_CSV_PATH,
+    "weight_paths": weight_paths,
     "eval_start": int(eval_start),
     "epoch": int(args.Epoch),
     "request_num": int(args.Request_Num),

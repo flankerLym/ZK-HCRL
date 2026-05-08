@@ -268,6 +268,61 @@ class baseline_DQN:
         self.learn_step_counter += 1
 
 
+    def save_model(self, path, metadata=None):
+        """Save NumPy DQN / Dueling Double DQN weights to a .npz file.
+
+        The saved file contains only model parameters and lightweight training
+        state, not the replay buffer. This keeps checkpoints compact and easy to
+        share. The same method is used by DQN and RA-DDQN because RA-DDQN
+        inherits this class with double_dqn=True and dueling=True.
+        """
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+        payload = {
+            "model_type": np.array("DuelingDoubleDQN" if self.dueling else "DQN"),
+            "scope": np.array(str(self.scope)),
+            "n_actions": np.array(self.n_actions),
+            "n_features": np.array(self.n_features),
+            "hidden_units": np.array(self.hidden_units),
+            "learning_rate": np.array(self.lr),
+            "gamma": np.array(self.gamma),
+            "epsilon": np.array(self.epsilon),
+            "epsilon_max": np.array(self.epsilon_max),
+            "learn_step_counter": np.array(self.learn_step_counter),
+            "double_dqn": np.array(self.double_dqn),
+            "dueling": np.array(self.dueling),
+            "W1": self.W1,
+            "b1": self.b1,
+            "tW1": self.tW1,
+            "tb1": self.tb1,
+            "reward_list": np.asarray(self.reward_list, dtype=np.float32),
+            "metadata": np.array(str(metadata or {})),
+        }
+        if self.dueling:
+            payload.update({
+                "Wv": self.Wv,
+                "bv": self.bv,
+                "Wa": self.Wa,
+                "ba": self.ba,
+                "tWv": self.tWv,
+                "tbv": self.tbv,
+                "tWa": self.tWa,
+                "tba": self.tba,
+            })
+        else:
+            payload.update({
+                "W2": self.W2,
+                "b2": self.b2,
+                "tW2": self.tW2,
+                "tb2": self.tb2,
+            })
+        np.savez_compressed(path, **payload)
+        return path
+
+
+
 class DuelingDoubleDQN(baseline_DQN):
     def __init__(self, n_actions, n_features, hidden_units=64, scope="RA_DDQN", learning_rate=0.002, **kwargs):
         super().__init__(
@@ -502,6 +557,35 @@ class baseline_PPO:
         self.rewards.clear()
         self.old_action_probs.clear()
         self.masks.clear()
+
+
+    def save_model(self, path, metadata=None):
+        """Save NumPy PPO-style actor/critic parameters to a .npz file."""
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        np.savez_compressed(
+            path,
+            model_type=np.array("PPO-style"),
+            scope=np.array(str(self.scope)),
+            n_actions=np.array(self.n_actions),
+            n_features=np.array(self.n_features),
+            actor_lr=np.array(self.actor_lr),
+            critic_lr=np.array(self.critic_lr),
+            gamma=np.array(self.gamma),
+            clip_ratio=np.array(self.clip_ratio),
+            batch_size=np.array(self.batch_size),
+            update_epochs=np.array(self.update_epochs),
+            entropy_coef=np.array(self.entropy_coef),
+            actor_w=self.actor_w,
+            actor_b=self.actor_b,
+            critic_w=self.critic_w,
+            critic_b=np.array(self.critic_b),
+            reward_list=np.asarray(self.reward_list, dtype=np.float32),
+            metadata=np.array(str(metadata or {})),
+        )
+        return path
+
 
 
 class baselines:
