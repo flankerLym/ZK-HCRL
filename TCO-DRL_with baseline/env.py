@@ -92,6 +92,8 @@ class SchedulingEnv:
         for name in self.policy_names:
             self.pb_records[name][4, :] = -1
             self.pb_records[name][5, :] = -1
+        # Recent backup utility histories for adaptive COBRA gates.
+        self.backup_score_history = {name: [] for name in self.policy_names}
 
     def gen_workload(self, lamda):
         intervalT = stats.expon.rvs(scale=1 / lamda * 60, size=self.requestNum)
@@ -392,20 +394,19 @@ class SchedulingEnv:
             candidates = np.array([c for c in range(self.oracleNum) if int(c) != int(primary_action)], dtype=int)
         if candidates.size == 0:
             return int(primary_action)
+        if policy_name == "COBRA-Oracle" and getattr(self.args, "COBRA_Random_Backup", False):
+            return int(np.random.choice(candidates))
         score = self._backup_score_vector(request_attrs, primary_action, policy_name)
         return int(candidates[np.argmax(score[candidates])])
 
     def _should_use_backup(self, request_attrs, primary, backup_action, backup_score, policy_name):
-        """Cost-aware backup trigger.
+        """Decide whether a backup should be invoked.
 
-        The previous PB-SafeDQN used a backup after every primary failure, which
-        maximized success but inflated cost and response time. This trigger keeps
-        the recovery mechanism, but skips backups whose expected observable utility
-        is too low or, in serial mode, cannot plausibly meet the remaining deadline.
+        PB-SafeDQN keeps the previous fixed/always gate. COBRA-Oracle uses an
+        adaptive utility gate: a backup is triggered only if its observable
+        utility exceeds a recent dynamic threshold and the constrained
+        cost/latency/risk terms are not obviously unfavorable.
         """
-        if getattr(self.args, "PB_Backup_Trigger", "cost_aware") == "always":
-            return True
-
         if int(backup_action) == int(primary["action"]):
             return False
 
@@ -418,6 +419,37 @@ class SchedulingEnv:
             if remaining <= 0 or estimated_exe > remaining:
                 return False
 
+        if policy_name == "COBRA-Oracle":
+            mode = getattr(self.args, "COBRA_Gate_Mode", "adaptive")
+            if mode == "always":
+                return True
+            if mode == "never":
+                return False
+
+            # Soft budget pre-screen: do not call backup if it is clearly too
+            # expensive and not very high utility. This prevents "always backup"
+            # behavior under difficult traces.
+            backup_cost = float(self.oracleCost[int(backup_action)])
+            cost_budget = float(getattr(self.args, "COBRA_Cost_Budget", 1.00))
+            if backup_cost > cost_budget * 1.35 and float(backup_score) < getattr(self.args, "COBRA_Min_Backup_Score", 0.46) + 0.08:
+                return False
+
+            if mode == "fixed":
+                return float(backup_score) >= float(getattr(self.args, "COBRA_Min_Backup_Score", 0.46))
+
+            hist = self.backup_score_history.get(policy_name, [])
+            window = int(getattr(self.args, "COBRA_Gate_Window", 400))
+            if len(hist) >= 20:
+                recent = np.asarray(hist[-window:], dtype=float)
+                dyn_thr = float(np.mean(recent) + float(getattr(self.args, "COBRA_Gate_Alpha", 0.15)) * np.std(recent))
+            else:
+                dyn_thr = float(getattr(self.args, "COBRA_Min_Backup_Score", 0.46))
+            threshold = max(float(getattr(self.args, "COBRA_Min_Backup_Score", 0.46)), dyn_thr)
+            return float(backup_score) >= threshold
+
+        # Existing PB-SafeDQN behavior.
+        if getattr(self.args, "PB_Backup_Trigger", "cost_aware") == "always":
+            return True
         return float(backup_score) >= float(getattr(self.args, "PB_Min_Backup_Score", 0.38))
 
     def feedback_primary_backup(self, request_attrs, primary_action, policy_name="PB-SafeDQN"):
@@ -480,7 +512,11 @@ class SchedulingEnv:
         # The final request is type-matched if the successful route was matched;
         # with type action masking this should be true, but keep it explicit.
         final_match = primary["match"] if primary_success else (backup["match"] if backup is not None else primary["match"])
-        reward = self._risk_aware_reward(
+        # Final system-level reward stored in events. For COBRA, this is a
+        # constrained reliability-cost objective. The reward returned to the
+        # primary Q-network can be decoupled below so backup recovery does not
+        # hide primary mistakes.
+        final_reward = self._risk_aware_reward(
             combined_rep,
             final_match,
             final_success,
@@ -489,11 +525,45 @@ class SchedulingEnv:
             ddl,
             combined_behavior,
         )
-        reward += self.args.PB_Primary_Success_Bonus * primary_success
-        reward += self.args.PB_Backup_Recovery_Bonus * backup_recovery
-        reward -= self.args.PB_Backup_Used_Penalty * backup_used
-        reward -= self.args.PB_Backup_Skip_Penalty * backup_skipped
-        reward = float(np.clip(reward, -self.args.Reward_Clip, self.args.Reward_Clip))
+
+        if policy_name == "COBRA-Oracle":
+            final_reward += self.args.COBRA_Primary_Success_Bonus * primary_success
+            final_reward += self.args.COBRA_Backup_Recovery_Bonus * backup_recovery
+            final_reward -= self.args.COBRA_Backup_Used_Penalty * backup_used
+            final_reward -= self.args.COBRA_Backup_Skip_Penalty * backup_skipped
+
+            # Soft Lagrangian-style constraints: penalize excessive recovery
+            # overhead so COBRA cannot win by simply calling more oracles.
+            cost_violation = max(0.0, float(total_cost) - float(self.args.COBRA_Cost_Budget))
+            latency_violation = max(0.0, float(final_duration) - float(self.args.COBRA_Latency_Budget)) / max(float(ddl), 1e-8)
+            risk_indicator = max(float(primary["is_malicious"]), float(backup["is_malicious"]) if backup is not None else 0.0)
+            risk_violation = max(0.0, risk_indicator - float(self.args.COBRA_Risk_Budget))
+            final_reward -= self.args.COBRA_Lambda_Cost * cost_violation
+            final_reward -= self.args.COBRA_Lambda_Latency * latency_violation
+            final_reward -= self.args.COBRA_Lambda_Risk * risk_violation
+
+            primary_train_reward = self._risk_aware_reward(
+                primary["reputation"],
+                primary["match"],
+                primary_success,
+                primary["cost"],
+                primary["durationT"],
+                ddl,
+                primary["behavior_record"],
+            )
+            primary_train_reward += self.args.COBRA_Primary_Success_Bonus * primary_success
+            primary_train_reward -= self.args.COBRA_Primary_Malicious_Penalty * primary["is_malicious"]
+            primary_train_reward -= 0.12 * (1.0 - primary_success)
+            train_reward = final_reward if getattr(self.args, "COBRA_No_Decoupled_Reward", False) else primary_train_reward
+        else:
+            final_reward += self.args.PB_Primary_Success_Bonus * primary_success
+            final_reward += self.args.PB_Backup_Recovery_Bonus * backup_recovery
+            final_reward -= self.args.PB_Backup_Used_Penalty * backup_used
+            final_reward -= self.args.PB_Backup_Skip_Penalty * backup_skipped
+            train_reward = final_reward
+
+        reward = float(np.clip(final_reward, -self.args.Reward_Clip, self.args.Reward_Clip))
+        train_reward = float(np.clip(train_reward, -self.args.Reward_Clip, self.args.Reward_Clip))
 
         # Write final combined request event.
         ev = self.events[policy_name]
@@ -537,8 +607,10 @@ class SchedulingEnv:
         pb[9, request_id] = backup["is_trusted"] if backup is not None else 0
         pb[10, request_id] = backup_skipped
         pb[11, request_id] = backup_score
+        if primary_success == 0:
+            self.backup_score_history.setdefault(policy_name, []).append(float(backup_score))
 
-        return reward
+        return train_reward
 
     def feedback(self, request_attrs, action, policy_name):
         if policy_name not in self.policy_names:

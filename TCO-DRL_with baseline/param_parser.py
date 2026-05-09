@@ -75,6 +75,51 @@ def parameter_parser():
     parser.add_argument("--PB_Prior_Strength", type=float, default=2.0,
                         help="Cold-start prior strength for backup recent-success estimate")
 
+    # COBRA-Oracle: cost-bounded recovery-aware RL.
+    parser.add_argument("--Use_COBRA", action="store_true",
+                        help="Append COBRA-Oracle: teacher-guided adaptive primary-backup safe DQN")
+    parser.add_argument("--COBRA_lr", type=float, default=0.0016,
+                        help="Learning rate for COBRA primary selector")
+    parser.add_argument("--COBRA_start_learn", type=int, default=200)
+    parser.add_argument("--COBRA_learn_interval", type=int, default=1)
+    parser.add_argument("--COBRA_Teacher_Source", choices=["DQN", "RA-DDQN", "none"], default="DQN",
+                        help="Teacher used for warm-start / early action guidance")
+    parser.add_argument("--COBRA_WarmStart_Episode", type=int, default=3,
+                        help="Copy teacher weights into COBRA at this episode; use 0 to copy immediately")
+    parser.add_argument("--COBRA_Teacher_Guidance_Episodes", type=int, default=8,
+                        help="Use teacher actions with decaying probability for the first N episodes")
+    parser.add_argument("--COBRA_Teacher_Start_Prob", type=float, default=0.75,
+                        help="Initial probability of using the teacher action for COBRA primary")
+    parser.add_argument("--COBRA_Min_Teacher_Prob", type=float, default=0.05)
+    parser.add_argument("--COBRA_Gate_Mode", choices=["adaptive", "fixed", "always", "never"], default="adaptive",
+                        help="Backup gate for COBRA. adaptive uses recent utility mean/std; fixed uses COBRA_Min_Backup_Score.")
+    parser.add_argument("--COBRA_Min_Backup_Score", type=float, default=0.46,
+                        help="Lower bound for COBRA backup utility; higher values use backup less often")
+    parser.add_argument("--COBRA_Gate_Alpha", type=float, default=0.15,
+                        help="Adaptive threshold = max(min_score, recent_mean + alpha * recent_std)")
+    parser.add_argument("--COBRA_Gate_Window", type=int, default=400,
+                        help="Recent backup utility window for adaptive gate")
+    parser.add_argument("--COBRA_Primary_Success_Bonus", type=float, default=0.26)
+    parser.add_argument("--COBRA_Backup_Recovery_Bonus", type=float, default=0.34)
+    parser.add_argument("--COBRA_Backup_Used_Penalty", type=float, default=0.22)
+    parser.add_argument("--COBRA_Backup_Skip_Penalty", type=float, default=0.03)
+    parser.add_argument("--COBRA_Cost_Budget", type=float, default=1.00,
+                        help="Soft cost budget used by COBRA constrained reward")
+    parser.add_argument("--COBRA_Latency_Budget", type=float, default=6.0,
+                        help="Soft latency budget used by COBRA constrained reward")
+    parser.add_argument("--COBRA_Risk_Budget", type=float, default=0.08,
+                        help="Soft malicious-risk budget used by COBRA constrained reward")
+    parser.add_argument("--COBRA_Lambda_Cost", type=float, default=0.45)
+    parser.add_argument("--COBRA_Lambda_Latency", type=float, default=0.35)
+    parser.add_argument("--COBRA_Lambda_Risk", type=float, default=0.65)
+    parser.add_argument("--COBRA_Primary_Malicious_Penalty", type=float, default=0.30)
+    parser.add_argument("--COBRA_Random_Backup", action="store_true",
+                        help="Ablation: use random same-type backup instead of safety-ranked backup")
+    parser.add_argument("--COBRA_No_Teacher", action="store_true",
+                        help="Ablation: disable teacher warm-start and teacher action guidance")
+    parser.add_argument("--COBRA_No_Decoupled_Reward", action="store_true",
+                        help="Ablation: train COBRA primary with final reward instead of primary-only reward")
+
     # Oracle Settings. These defaults are overwritten by the scalable generator below.
     parser.add_argument("--Oracle_Type", type=list, default=[0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2], help="Oracle Type")
     parser.add_argument("--Oracle_Cost", type=list, default=[0.3, 0.3, 0.6, 0.6, 0.9, 0.3, 0.3, 0.6, 0.6, 0.9, 0.3, 0.3, 0.6, 0.6, 0.9], help="Oracle Cost")
@@ -193,6 +238,11 @@ def parameter_parser():
         args.Baselines.append("RA-DDQN")
     if args.Use_PB_SafeDQN and "PB-SafeDQN" not in args.Baselines:
         args.Baselines.append("PB-SafeDQN")
+    if args.Use_COBRA and "COBRA-Oracle" not in args.Baselines:
+        args.Baselines.append("COBRA-Oracle")
+    if args.COBRA_No_Teacher:
+        args.COBRA_Teacher_Source = "none"
+        args.COBRA_Teacher_Start_Prob = 0.0
 
     # Auto-generate scalable oracle community.
     # Role pattern matches the original 15-node setup: each service type has malicious, trusted, normal, trusted, trusted.

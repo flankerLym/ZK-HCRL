@@ -144,6 +144,8 @@ brainDQN = None
 brainPPO = None
 brainRA = None
 brainPB = None
+brainCOBRA = None
+cobra_warm_started = False
 
 if "DQN" in args.Baselines:
     brainDQN = baseline_DQN(
@@ -195,6 +197,19 @@ if "PB-SafeDQN" in args.Baselines:
         seed=args.Seed + 1009,
     )
 
+if "COBRA-Oracle" in args.Baselines:
+    brainCOBRA = DuelingDoubleDQN(
+        env.actionNum, env.s_features,
+        hidden_units=args.Dqn_hidden,
+        scope="COBRA_Oracle",
+        learning_rate=args.COBRA_lr,
+        memory_size=args.Dqn_memory_size,
+        batch_size=args.Dqn_batch_size,
+        e_greedy_increment=args.Dqn_epsilon_increment,
+        reward_clip=args.Reward_Clip,
+        seed=args.Seed + 2027,
+    )
+
 global_step = 0
 # Use one consistent evaluation window for per-episode and final summaries.
 # This excludes the warm-up/exploration prefix when Request_Num is small.
@@ -215,6 +230,7 @@ for episode in range(args.Epoch):
     has_last_ppo = False
     has_last_ra = False
     has_last_pb = False
+    has_last_cobra = False
 
     if brainDQN is not None:
         brainDQN.reward_list.clear()
@@ -224,6 +240,22 @@ for episode in range(args.Epoch):
         brainRA.reward_list.clear()
     if brainPB is not None:
         brainPB.reward_list.clear()
+    if brainCOBRA is not None:
+        brainCOBRA.reward_list.clear()
+
+    # Teacher-guided warm-start for COBRA. This copies the current teacher
+    # representation into COBRA once, after the teacher has had several
+    # episodes to learn a strong single-oracle primary policy.
+    if brainCOBRA is not None and (not cobra_warm_started) and (not args.COBRA_No_Teacher) and episode >= args.COBRA_WarmStart_Episode:
+        teacher_model = None
+        if args.COBRA_Teacher_Source == "DQN":
+            teacher_model = brainDQN
+        elif args.COBRA_Teacher_Source == "RA-DDQN":
+            teacher_model = brainRA
+        if teacher_model is not None and brainCOBRA.copy_from(teacher_model, copy_optimizer_state=False):
+            brainCOBRA.set_epsilon(min(getattr(teacher_model, "epsilon", 0.2), 0.35))
+            cobra_warm_started = True
+            print(f"[COBRA] warm-started primary selector from {args.COBRA_Teacher_Source} at episode {episode}")
 
     while True:
         # Update reputation every Time_Period_Size requests.
@@ -343,6 +375,36 @@ for episode in range(args.Epoch):
             last_pb_reward = reward_PB
             has_last_pb = True
 
+        # COBRA-Oracle: teacher-guided primary + adaptive constrained backup.
+        if brainCOBRA is not None:
+            cobra_state = env.getState(request_attrs, "COBRA-Oracle")
+            cobra_mask = env.get_action_mask(request_attrs)
+            if has_last_cobra:
+                brainCOBRA.store_transition(last_cobra_state, last_cobra_action, last_cobra_reward, cobra_state, cobra_mask)
+
+            teacher_action = None
+            if (not args.COBRA_No_Teacher) and episode < args.COBRA_Teacher_Guidance_Episodes:
+                teacher_model = brainDQN if args.COBRA_Teacher_Source == "DQN" else (brainRA if args.COBRA_Teacher_Source == "RA-DDQN" else None)
+                if teacher_model is not None:
+                    teacher_action = teacher_model.choose_best_action(cobra_state, cobra_mask)
+            if teacher_action is not None:
+                frac = max(0.0, 1.0 - episode / max(args.COBRA_Teacher_Guidance_Episodes, 1))
+                teacher_prob = max(args.COBRA_Min_Teacher_Prob, args.COBRA_Teacher_Start_Prob * frac)
+            else:
+                teacher_prob = 0.0
+
+            if teacher_action is not None and np.random.rand() < teacher_prob:
+                action_COBRA = int(teacher_action)
+            else:
+                action_COBRA = brainCOBRA.choose_action(cobra_state, cobra_mask)
+            reward_COBRA = env.feedback_primary_backup(request_attrs, action_COBRA, "COBRA-Oracle")
+            if (global_step > args.COBRA_start_learn) and (global_step % args.COBRA_learn_interval == 0):
+                brainCOBRA.learn()
+            last_cobra_state = cobra_state
+            last_cobra_action = action_COBRA
+            last_cobra_reward = reward_COBRA
+            has_last_cobra = True
+
         if request_c % 500 == 0:
             # Keep these calls for compatibility with the original code, even if the values are not printed here.
             env.get_accumulateRewards(args.Baseline_num, performance_c, request_c)
@@ -379,15 +441,18 @@ for episode in range(args.Epoch):
             ' finishT:', total_Ts[i],
             'Cost:', total_cost[i],
         )
-    if "PB-SafeDQN" in args.Baselines:
-        print(
-            '[PB-SafeDQN diagnostics]',
-            'primary_success_rate:', env.get_totalPrimarySuccessRate(args.Baseline_num, startP)[args.Baselines.index("PB-SafeDQN")],
-            'backup_used_rate:', env.get_totalBackupUsedRate(args.Baseline_num, startP)[args.Baselines.index("PB-SafeDQN")],
-            'backup_recovery_rate:', env.get_totalBackupRecoveryRate(args.Baseline_num, startP)[args.Baselines.index("PB-SafeDQN")],
-            'conditional_backup_recovery_rate:', env.get_totalConditionalBackupRecoveryRate(args.Baseline_num, startP)[args.Baselines.index("PB-SafeDQN")],
-            'backup_skipped_rate:', env.get_totalBackupSkippedRate(args.Baseline_num, startP)[args.Baselines.index("PB-SafeDQN")],
-        )
+    for diag_name in ["PB-SafeDQN", "COBRA-Oracle"]:
+        if diag_name in args.Baselines:
+            idx_diag = args.Baselines.index(diag_name)
+            print(
+                f'[{diag_name} diagnostics]',
+                'primary_success_rate:', env.get_totalPrimarySuccessRate(args.Baseline_num, startP)[idx_diag],
+                'backup_used_rate:', env.get_totalBackupUsedRate(args.Baseline_num, startP)[idx_diag],
+                'backup_recovery_rate:', env.get_totalBackupRecoveryRate(args.Baseline_num, startP)[idx_diag],
+                'conditional_backup_recovery_rate:', env.get_totalConditionalBackupRecoveryRate(args.Baseline_num, startP)[idx_diag],
+                'backup_skipped_rate:', env.get_totalBackupSkippedRate(args.Baseline_num, startP)[idx_diag],
+                'backup_score_mean:', env.get_totalBackupScoreMean(args.Baseline_num, startP)[idx_diag],
+            )
 
     if episode != 0 or args.Epoch == 1:
         performance_lamda += env.get_total_responseTs(args.Baseline_num, eval_start)
@@ -554,6 +619,11 @@ if brainPB is not None:
         os.path.join(RUN_DIR, f"{RUN_ID}_PB-SafeDQN_weights.npz"),
         metadata={**weight_metadata, "method": "PB-SafeDQN", "backup_mode": args.PB_Backup_Mode, "backup_trigger": args.PB_Backup_Trigger, "min_backup_score": args.PB_Min_Backup_Score},
     )
+if brainCOBRA is not None:
+    weight_paths["COBRA-Oracle"] = brainCOBRA.save_model(
+        os.path.join(RUN_DIR, f"{RUN_ID}_COBRA-Oracle_weights.npz"),
+        metadata={**weight_metadata, "method": "COBRA-Oracle", "teacher_source": args.COBRA_Teacher_Source, "gate_mode": args.COBRA_Gate_Mode, "min_backup_score": args.COBRA_Min_Backup_Score},
+    )
 
 print('saved model weights:')
 if len(weight_paths) == 0:
@@ -579,6 +649,9 @@ run_metadata = {
     "action_mask_mode": args.Action_Mask_Mode,
     "pb_backup_trigger": getattr(args, "PB_Backup_Trigger", None),
     "pb_min_backup_score": float(getattr(args, "PB_Min_Backup_Score", 0.0)),
+    "cobra_gate_mode": getattr(args, "COBRA_Gate_Mode", None),
+    "cobra_teacher_source": getattr(args, "COBRA_Teacher_Source", None),
+    "cobra_min_backup_score": float(getattr(args, "COBRA_Min_Backup_Score", 0.0)),
     "baselines": list(args.Baselines),
     "seed": int(args.Seed),
     "reward_scale": float(args.Reward_Scale),

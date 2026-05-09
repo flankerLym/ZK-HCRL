@@ -267,6 +267,50 @@ class baseline_DQN:
             self.epsilon = self.epsilon_max
         self.learn_step_counter += 1
 
+    def copy_from(self, other, copy_optimizer_state=False):
+        """Warm-start this value network from another DQN-style model.
+
+        This is used by COBRA-Oracle's teacher-guided primary selector.  If the
+        source and target heads differ (e.g., source DQN and target dueling
+        DDQN), the shared representation is copied and the source Q head is
+        mapped into the dueling advantage head so that the action ranking is
+        approximately preserved.
+        """
+        if other is None:
+            return False
+        if getattr(other, "n_features", None) != self.n_features or getattr(other, "n_actions", None) != self.n_actions:
+            return False
+        self.W1 = other.W1.copy(); self.b1 = other.b1.copy()
+        self.tW1 = other.tW1.copy(); self.tb1 = other.tb1.copy()
+
+        if self.dueling and getattr(other, "dueling", False):
+            self.Wv = other.Wv.copy(); self.bv = other.bv.copy()
+            self.Wa = other.Wa.copy(); self.ba = other.ba.copy()
+            self.tWv = other.tWv.copy(); self.tbv = other.tbv.copy()
+            self.tWa = other.tWa.copy(); self.tba = other.tba.copy()
+        elif self.dueling and not getattr(other, "dueling", False):
+            # Preserve the teacher's action ranking by using its Q head as the
+            # advantage head.  The scalar value stream starts from zero.
+            self.Wv = np.zeros_like(self.Wv); self.bv = np.zeros_like(self.bv)
+            self.Wa = other.W2.copy(); self.ba = other.b2.copy()
+            self.tWv = np.zeros_like(self.tWv); self.tbv = np.zeros_like(self.tbv)
+            self.tWa = other.tW2.copy(); self.tba = other.tb2.copy()
+        elif (not self.dueling) and getattr(other, "dueling", False):
+            # Map the teacher's dueling advantage stream to a standard Q head.
+            self.W2 = other.Wa.copy(); self.b2 = other.ba.copy()
+            self.tW2 = other.tWa.copy(); self.tb2 = other.tba.copy()
+        else:
+            self.W2 = other.W2.copy(); self.b2 = other.b2.copy()
+            self.tW2 = other.tW2.copy(); self.tb2 = other.tb2.copy()
+
+        if copy_optimizer_state:
+            self.epsilon = float(getattr(other, "epsilon", self.epsilon))
+            self.learn_step_counter = int(getattr(other, "learn_step_counter", self.learn_step_counter))
+        return True
+
+    def set_epsilon(self, value):
+        self.epsilon = float(np.clip(value, 0.0, self.epsilon_max))
+
 
     def save_model(self, path, metadata=None):
         """Save NumPy DQN / Dueling Double DQN weights to a .npz file.
