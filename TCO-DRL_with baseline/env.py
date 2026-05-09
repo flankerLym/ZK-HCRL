@@ -91,14 +91,24 @@ class SchedulingEnv:
         # 12 HCRL mode index (0=single,1=serial,2=parallel),
         # 13 single_mode flag, 14 serial_mode flag, 15 parallel_mode flag,
         # 16 constraint violation flag, 17 cost violation magnitude,
-        # 18 latency violation magnitude, 19 risk violation magnitude.
+        # 18 latency violation magnitude, 19 risk violation magnitude,
+        # 20 lambda_cost, 21 lambda_latency, 22 lambda_risk.
         # Values remain zero for non-primary-backup policies.
-        self.pb_records = {name: np.zeros((20, self.requestNum)) for name in self.policy_names}
+        self.pb_records = {name: np.zeros((23, self.requestNum)) for name in self.policy_names}
         for name in self.policy_names:
             self.pb_records[name][4, :] = -1
             self.pb_records[name][5, :] = -1
         # Recent backup utility histories for adaptive COBRA gates.
         self.backup_score_history = {name: [] for name in self.policy_names}
+        # Dynamic Lagrange multipliers for HCRL primal-dual constrained RL.
+        self.hcrl_lambdas = {
+            name: {
+                "cost": float(getattr(self.args, "HCRL_Lambda_Cost", 0.55)),
+                "latency": float(getattr(self.args, "HCRL_Lambda_Latency", 0.40)),
+                "risk": float(getattr(self.args, "HCRL_Lambda_Risk", 0.80)),
+            }
+            for name in self.policy_names
+        }
 
     def gen_workload(self, lamda):
         intervalT = stats.expon.rvs(scale=1 / lamda * 60, size=self.requestNum)
@@ -516,6 +526,31 @@ class SchedulingEnv:
             rf[2, action] += attempt["durationT"]
             rf[3, action] += attempt["behavior_record"]
 
+
+    def _get_hcrl_lambdas(self, policy_name):
+        if not hasattr(self, "hcrl_lambdas"):
+            self.hcrl_lambdas = {}
+        if policy_name not in self.hcrl_lambdas:
+            self.hcrl_lambdas[policy_name] = {
+                "cost": float(getattr(self.args, "HCRL_Lambda_Cost", 0.55)),
+                "latency": float(getattr(self.args, "HCRL_Lambda_Latency", 0.40)),
+                "risk": float(getattr(self.args, "HCRL_Lambda_Risk", 0.80)),
+            }
+        return self.hcrl_lambdas[policy_name]
+
+    def _update_hcrl_lambdas(self, policy_name, cost_violation, latency_violation, risk_violation):
+        """Primal-dual update for HCRL cost/latency/risk multipliers."""
+        if getattr(self.args, "HCRL_No_Constrained", False) or not getattr(self.args, "HCRL_Primal_Dual", True):
+            return self._get_hcrl_lambdas(policy_name)
+        lambdas = self._get_hcrl_lambdas(policy_name)
+        lr = float(getattr(self.args, "HCRL_Lambda_LR", 0.01))
+        lo = float(getattr(self.args, "HCRL_Lambda_Min", 0.0))
+        hi = float(getattr(self.args, "HCRL_Lambda_Max", 3.0))
+        lambdas["cost"] = float(np.clip(lambdas["cost"] + lr * float(cost_violation), lo, hi))
+        lambdas["latency"] = float(np.clip(lambdas["latency"] + lr * float(latency_violation), lo, hi))
+        lambdas["risk"] = float(np.clip(lambdas["risk"] + lr * float(risk_violation), lo, hi))
+        return lambdas
+
     def feedback_hcrl(self, request_attrs, mode_action, primary_action, backup_action, policy_name="HCRL-Oracle"):
         """Hierarchical Constrained RL feedback.
 
@@ -615,10 +650,11 @@ class SchedulingEnv:
         risk_violation = max(0.0, risk_indicator - float(getattr(self.args, "HCRL_Risk_Budget", 0.06)))
         constraint_violation = 1.0 if (cost_violation > 0 or latency_violation > 0 or risk_violation > 0) else 0.0
 
+        lambda_state = self._get_hcrl_lambdas(policy_name)
         if not getattr(self.args, "HCRL_No_Constrained", False):
-            final_reward -= float(getattr(self.args, "HCRL_Lambda_Cost", 0.55)) * cost_violation
-            final_reward -= float(getattr(self.args, "HCRL_Lambda_Latency", 0.40)) * latency_violation
-            final_reward -= float(getattr(self.args, "HCRL_Lambda_Risk", 0.80)) * risk_violation
+            final_reward -= float(lambda_state["cost"]) * cost_violation
+            final_reward -= float(lambda_state["latency"]) * latency_violation
+            final_reward -= float(lambda_state["risk"]) * risk_violation
 
         # Mode policy reward: final system utility minus mode-specific overhead.
         mode_reward = final_reward
@@ -697,6 +733,12 @@ class SchedulingEnv:
         pb[17, request_id] = cost_violation
         pb[18, request_id] = latency_violation
         pb[19, request_id] = risk_violation
+        # Dynamic primal-dual lambda update is performed after recording the
+        # transition so the next decision observes the updated budget pressure.
+        lambda_state = self._update_hcrl_lambdas(policy_name, cost_violation, latency_violation, risk_violation)
+        pb[20, request_id] = lambda_state["cost"]
+        pb[21, request_id] = lambda_state["latency"]
+        pb[22, request_id] = lambda_state["risk"]
         if primary_success == 0 and backup_action >= 0:
             self.backup_score_history.setdefault(policy_name, []).append(float(backup_score))
 
@@ -1052,6 +1094,97 @@ class SchedulingEnv:
     def get_request_num(self, policy_name):
         return np.array(self.reputation_factors[policy_name][0, :])
 
+
+    def _build_oracle_feature_matrix(self, request_attrs, policy_name):
+        """Return normalized per-oracle node features used by the graph encoder.
+
+        The raw enhanced state stores oracle features by feature group.  The GNN
+        encoder instead treats each oracle as a node and aggregates information
+        from dynamically related oracle nodes.  The output keeps 8 dimensions per
+        oracle so it can replace the flat oracle feature block without changing
+        downstream model input size.
+        """
+        arrivalT = float(request_attrs[1])
+        length = float(request_attrs[2])
+        request_service = int(request_attrs[3])
+        idleTimes = self.get_oracle_idleT(policy_name)
+        reputations = self.get_oracle_reputation(policy_name)
+        waitTimes = np.maximum(idleTimes - arrivalT, 0.0)
+        type_match = np.array([1.0 if request_service == int(t) else 0.0 for t in self.oracleTypes])
+        req_num = self.reputation_factors[policy_name][0]
+        val_num = self.reputation_factors[policy_name][1]
+        recent_success_rate = np.divide(val_num, np.maximum(req_num, 1.0), dtype=float)
+        recent_load = req_num / max(self.timeperiodSize, 1)
+        if getattr(self.args, "Expose_Validation_Prob", False):
+            validation_feature = self.oracleValidationProbs
+        else:
+            validation_feature = np.zeros(self.oracleNum, dtype=float)
+
+        wait_norm = np.clip(waitTimes / max(float(self.ddl), 1e-8), 0.0, 3.0) / 3.0
+        rep_norm = 0.5 * (np.tanh(reputations) + 1.0)
+        cost_norm = self.oracleCost / max(float(np.max(self.oracleCost)), 1e-8)
+        acc_norm = self.oracleAcc / max(float(np.max(self.oracleAcc)), 1e-8)
+        load_norm = np.clip(recent_load, 0.0, 2.0) / 2.0
+        X = np.vstack([
+            wait_norm,
+            rep_norm,
+            cost_norm,
+            acc_norm,
+            type_match,
+            validation_feature,
+            recent_success_rate,
+            load_norm,
+        ]).T.astype(float)
+        return np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=0.0)
+
+    def _dynamic_oracle_adjacency(self, X):
+        """Construct a dynamic reliability graph over oracle nodes.
+
+        Edges are stronger for same-service oracles, similar recent reliability,
+        similar load, and similar cost tier.  This graph is recomputed for each
+        policy/request from observable historical statistics, enabling the state
+        encoder to capture relations between oracle nodes rather than treating
+        each node independently.
+        """
+        N = self.oracleNum
+        types = self.oracleTypes.astype(int)
+        same_service = (types[:, None] == types[None, :]).astype(float)
+        rel = X[:, 6]
+        load = X[:, 7]
+        cost = X[:, 2]
+        rel_sim = np.exp(-2.5 * np.abs(rel[:, None] - rel[None, :]))
+        load_sim = np.exp(-2.0 * np.abs(load[:, None] - load[None, :]))
+        cost_sim = np.exp(-2.0 * np.abs(cost[:, None] - cost[None, :]))
+        A = (
+            float(getattr(self.args, "GNN_Service_Weight", 1.0)) * same_service
+            + float(getattr(self.args, "GNN_Reliability_Weight", 0.45)) * rel_sim
+            + float(getattr(self.args, "GNN_Load_Weight", 0.35)) * load_sim
+            + float(getattr(self.args, "GNN_Cost_Weight", 0.25)) * cost_sim
+        )
+        A += np.eye(N) * float(getattr(self.args, "GNN_Self_Weight", 0.55))
+        A = np.maximum(A, 0.0)
+        A = A / np.maximum(np.sum(A, axis=1, keepdims=True), 1e-8)
+        return A
+
+    def _graph_encode_oracle_features(self, request_attrs, policy_name):
+        """Lightweight dynamic GNN-style message passing encoder.
+
+        The operation is intentionally dependency-free NumPy message passing:
+        H^{l+1} = ReLU(w_self H^l + w_neigh A H^l).  The downstream RL network
+        learns on top of these graph-contextual embeddings.  This implements the
+        graph Oracle encoder without introducing PyTorch/TensorFlow dependencies.
+        """
+        H = self._build_oracle_feature_matrix(request_attrs, policy_name)
+        A = self._dynamic_oracle_adjacency(H)
+        steps = int(getattr(self.args, "GNN_Message_Steps", 2))
+        w_self = float(getattr(self.args, "GNN_Self_Weight", 0.55))
+        w_neigh = float(getattr(self.args, "GNN_Neighbor_Weight", 0.45))
+        for _ in range(max(0, steps)):
+            H = np.maximum(w_self * H + w_neigh * A.dot(H), 0.0)
+            # Keep scale bounded for the NumPy RL models.
+            H = np.clip(H, 0.0, 2.0)
+        return H
+
     def getState(self, request_attrs, policy_name):
         arrivalT = request_attrs[1]
         length = request_attrs[2]
@@ -1074,6 +1207,12 @@ class SchedulingEnv:
             validation_feature = self.oracleValidationProbs
         else:
             validation_feature = np.zeros(self.oracleNum, dtype=float)
+
+        if getattr(self.args, "Use_GNN_Encoder", False):
+            H = self._graph_encode_oracle_features(request_attrs, policy_name)
+            # Flatten by feature group to keep the original 3 + 8N layout.
+            oracle_block = H.T.reshape(-1)
+            return np.hstack(([request_service, length, self.ddl], oracle_block))
 
         return np.hstack((
             [request_service, length, self.ddl],
@@ -1220,6 +1359,16 @@ class SchedulingEnv:
         start = min(max(int(start), 0), self.requestNum - 1)
         denom = max(self.requestNum - start, 1)
         return np.around(self._metric_array(lambda n: np.sum(self.pb_records[n][19, start:self.requestNum]) / denom), 4)
+
+
+    def get_totalHCRLLambdaCostMean(self, policies, start=0):
+        return self._pb_rate(20, start)
+
+    def get_totalHCRLLambdaLatencyMean(self, policies, start=0):
+        return self._pb_rate(21, start)
+
+    def get_totalHCRLLambdaRiskMean(self, policies, start=0):
+        return self._pb_rate(22, start)
 
     def get_totalCostPerSuccess(self, policies, start=0):
         start = min(max(int(start), 0), self.requestNum - 1)

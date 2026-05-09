@@ -128,6 +128,12 @@ def parameter_parser():
                         help="Learning rate for HCRL primary and backup selectors")
     parser.add_argument("--HCRL_Mode_lr", type=float, default=0.0010,
                         help="Learning rate for HCRL high-level mode policy")
+    parser.add_argument("--HCRL_Use_Actor_Critic", action="store_true", default=True,
+                        help="Use masked option actor-critic policies for HCRL mode/primary/backup")
+    parser.add_argument("--HCRL_AC_Entropy", type=float, default=0.015,
+                        help="Entropy coefficient for HCRL option actor-critic policies")
+    parser.add_argument("--HCRL_AC_Value_Coef", type=float, default=0.5,
+                        help="Value-loss coefficient for HCRL option actor-critic policies")
     parser.add_argument("--HCRL_start_learn", type=int, default=200)
     parser.add_argument("--HCRL_learn_interval", type=int, default=1)
     parser.add_argument("--HCRL_Backup_learn_interval", type=int, default=1)
@@ -160,6 +166,12 @@ def parameter_parser():
     parser.add_argument("--HCRL_Lambda_Cost", type=float, default=0.55)
     parser.add_argument("--HCRL_Lambda_Latency", type=float, default=0.40)
     parser.add_argument("--HCRL_Lambda_Risk", type=float, default=0.80)
+    parser.add_argument("--HCRL_Primal_Dual", action="store_true", default=True,
+                        help="Dynamically update HCRL Lagrange multipliers from observed constraint violations")
+    parser.add_argument("--HCRL_Lambda_LR", type=float, default=0.01,
+                        help="Step size for primal-dual Lagrange multiplier updates")
+    parser.add_argument("--HCRL_Lambda_Min", type=float, default=0.0)
+    parser.add_argument("--HCRL_Lambda_Max", type=float, default=3.0)
     parser.add_argument("--HCRL_Parallel_Cost_Discount", type=float, default=0.85,
                         help="Effective cost multiplier for parallel warm-standby backup, modeling shared query overhead")
     parser.add_argument("--HCRL_Mode_Names", nargs="+", default=["single", "serial", "parallel"],
@@ -202,6 +214,19 @@ def parameter_parser():
     parser.add_argument("--Noise_Probability", type=float, default=0.0, help="Probability that an oracle response suffers extra latency noise")
     parser.add_argument("--Noise_Delay", type=float, default=1.0, help="Extra response time added under noise")
     parser.add_argument("--State_Mode", choices=["original", "enhanced"], default="original", help="State representation. original preserves the paper setting; enhanced adds cost/acc/type-match/validation features.")
+    # Dynamic graph oracle encoder. When enabled, the oracle feature block in
+    # the enhanced state is replaced by graph message-passed oracle embeddings
+    # with the same dimensionality, so existing DQN/AC models remain compatible.
+    parser.add_argument("--Use_GNN_Encoder", action="store_true",
+                        help="Enable dynamic graph message-passing encoder for oracle states")
+    parser.add_argument("--GNN_Message_Steps", type=int, default=2,
+                        help="Number of graph message-passing rounds for oracle encoder")
+    parser.add_argument("--GNN_Self_Weight", type=float, default=0.55)
+    parser.add_argument("--GNN_Neighbor_Weight", type=float, default=0.45)
+    parser.add_argument("--GNN_Service_Weight", type=float, default=1.00)
+    parser.add_argument("--GNN_Reliability_Weight", type=float, default=0.45)
+    parser.add_argument("--GNN_Load_Weight", type=float, default=0.35)
+    parser.add_argument("--GNN_Cost_Weight", type=float, default=0.25)
     parser.add_argument("--Reward_Mode", choices=["original", "risk_aware"], default="original", help="Reward function. original preserves the paper setting; risk_aware adds validation/behavior/timeout penalties.")
     parser.add_argument("--Success_Mode", choices=["original", "validation_aware"], default="original",
                         help="original: success requires deadline+type match; validation_aware: success also requires validation success.")
@@ -298,6 +323,11 @@ def parameter_parser():
         args.Baselines.append("COBRA-Oracle")
     if args.Use_HCRL and "HCRL-Oracle" not in args.Baselines:
         args.Baselines.append("HCRL-Oracle")
+    # HCRL is designed around graph-context oracle states. Enable the
+    # dynamic graph encoder automatically unless the user explicitly keeps it off
+    # by not using HCRL. This does not change state dimensionality.
+    if args.Use_HCRL:
+        args.Use_GNN_Encoder = True
     if args.COBRA_No_Teacher:
         args.COBRA_Teacher_Source = "none"
         args.COBRA_Teacher_Start_Prob = 0.0

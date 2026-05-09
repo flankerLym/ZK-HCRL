@@ -24,7 +24,7 @@ from matplotlib import pyplot as plt
 import seaborn as sns
 
 from env import SchedulingEnv
-from model import baseline_DQN, baseline_PPO, DuelingDoubleDQN, baselines, BLOR
+from model import baseline_DQN, baseline_PPO, DuelingDoubleDQN, OptionActorCritic, baselines, BLOR
 from utils import get_args
 
 
@@ -86,7 +86,8 @@ RUN_ID = (
 )
 # Resolve output directory from the command working directory.
 # This fixes cases where files were saved into a downloaded zip/replacement path.
-_output_arg = Path(getattr(args, "Output_Dir", "output"))
+_output_arg = Path(getattr(args, "Output_Dir",
+                           "../../../../../下载/TCO_DRL_HCRL_Oracle_full_implementation_replacement/TCO-DRL_with baseline/output"))
 if _output_arg.is_absolute():
     OUTPUT_BASE = _output_arg
 else:
@@ -145,6 +146,9 @@ performance_constraint_violation = np.zeros(args.Baseline_num)
 performance_cost_violation = np.zeros(args.Baseline_num)
 performance_latency_violation = np.zeros(args.Baseline_num)
 performance_risk_violation = np.zeros(args.Baseline_num)
+performance_hcrl_lambda_cost = np.zeros(args.Baseline_num)
+performance_hcrl_lambda_latency = np.zeros(args.Baseline_num)
+performance_hcrl_lambda_risk = np.zeros(args.Baseline_num)
 
 # Generate environment.
 env = SchedulingEnv(args)
@@ -230,36 +234,42 @@ if "HCRL-Oracle" in args.Baselines:
     # 1) high-level mode policy over {single, serial, parallel};
     # 2) low-level primary selector;
     # 3) low-level backup selector.
-    brainHCRLMode = DuelingDoubleDQN(
+    # True hierarchical option actor-critic policies.  The high-level policy
+    # learns an option/mode, while low-level actor-critics learn primary and
+    # backup oracle selection.
+    brainHCRLMode = OptionActorCritic(
         3, env.s_features + 6,
         hidden_units=max(64, args.Dqn_hidden // 2),
-        scope="HCRL_Mode",
+        scope="HCRL_Mode_OptionAC",
         learning_rate=args.HCRL_Mode_lr,
         memory_size=args.Dqn_memory_size,
         batch_size=args.Dqn_batch_size,
-        e_greedy_increment=args.Dqn_epsilon_increment,
+        entropy_coef=args.HCRL_AC_Entropy,
+        value_coef=args.HCRL_AC_Value_Coef,
         reward_clip=args.Reward_Clip,
         seed=args.Seed + 3031,
     )
-    brainHCRLPrimary = DuelingDoubleDQN(
+    brainHCRLPrimary = OptionActorCritic(
         env.actionNum, env.s_features,
         hidden_units=args.Dqn_hidden,
-        scope="HCRL_Primary",
+        scope="HCRL_Primary_OptionAC",
         learning_rate=args.HCRL_lr,
         memory_size=args.Dqn_memory_size,
         batch_size=args.Dqn_batch_size,
-        e_greedy_increment=args.Dqn_epsilon_increment,
+        entropy_coef=args.HCRL_AC_Entropy,
+        value_coef=args.HCRL_AC_Value_Coef,
         reward_clip=args.Reward_Clip,
         seed=args.Seed + 4049,
     )
-    brainHCRLBackup = DuelingDoubleDQN(
+    brainHCRLBackup = OptionActorCritic(
         env.actionNum, env.s_features,
         hidden_units=args.Dqn_hidden,
-        scope="HCRL_Backup",
+        scope="HCRL_Backup_OptionAC",
         learning_rate=args.HCRL_lr,
         memory_size=args.Dqn_memory_size,
         batch_size=args.Dqn_batch_size,
-        e_greedy_increment=args.Dqn_epsilon_increment,
+        entropy_coef=args.HCRL_AC_Entropy,
+        value_coef=args.HCRL_AC_Value_Coef,
         reward_clip=args.Reward_Clip,
         seed=args.Seed + 5051,
     )
@@ -551,11 +561,11 @@ for episode in range(args.Epoch):
 
             # Store previous transitions with current next states and masks.
             if has_last_hcrl_mode:
-                brainHCRLMode.store_transition(last_hcrl_mode_state, last_hcrl_mode_action, last_hcrl_mode_reward, hcrl_mode_state, hcrl_mode_mask)
+                brainHCRLMode.store_transition(last_hcrl_mode_state, last_hcrl_mode_action, last_hcrl_mode_reward, hcrl_mode_state, hcrl_mode_mask, last_hcrl_mode_mask)
             if has_last_hcrl_primary:
-                brainHCRLPrimary.store_transition(last_hcrl_primary_state, last_hcrl_primary_action, last_hcrl_primary_reward, hcrl_state, hcrl_primary_mask)
+                brainHCRLPrimary.store_transition(last_hcrl_primary_state, last_hcrl_primary_action, last_hcrl_primary_reward, hcrl_state, hcrl_primary_mask, last_hcrl_primary_mask)
             if has_last_hcrl_backup:
-                brainHCRLBackup.store_transition(last_hcrl_backup_state, last_hcrl_backup_action, last_hcrl_backup_reward, hcrl_state, hcrl_backup_mask)
+                brainHCRLBackup.store_transition(last_hcrl_backup_state, last_hcrl_backup_action, last_hcrl_backup_reward, hcrl_state, hcrl_backup_mask, last_hcrl_backup_mask)
 
             hcrl_feedback = env.feedback_hcrl(
                 request_attrs, mode_HCRL, action_HCRL_primary, action_HCRL_backup, "HCRL-Oracle"
@@ -570,11 +580,13 @@ for episode in range(args.Epoch):
             last_hcrl_mode_state = hcrl_mode_state
             last_hcrl_mode_action = mode_HCRL
             last_hcrl_mode_reward = hcrl_feedback["mode_reward"]
+            last_hcrl_mode_mask = hcrl_mode_mask
             has_last_hcrl_mode = True
 
             last_hcrl_primary_state = hcrl_state
             last_hcrl_primary_action = action_HCRL_primary
             last_hcrl_primary_reward = hcrl_feedback["primary_reward"]
+            last_hcrl_primary_mask = hcrl_primary_mask
             has_last_hcrl_primary = True
 
             # Train backup only when the hierarchy actually considered a backup action.
@@ -582,6 +594,7 @@ for episode in range(args.Epoch):
                 last_hcrl_backup_state = hcrl_state
                 last_hcrl_backup_action = action_HCRL_backup
                 last_hcrl_backup_reward = hcrl_feedback["backup_reward"]
+                last_hcrl_backup_mask = hcrl_backup_mask
                 has_last_hcrl_backup = True
 
         if request_c % 500 == 0:
@@ -662,6 +675,9 @@ for episode in range(args.Epoch):
         performance_cost_violation += env.get_totalCostViolationMean(args.Baseline_num, eval_start)
         performance_latency_violation += env.get_totalLatencyViolationMean(args.Baseline_num, eval_start)
         performance_risk_violation += env.get_totalRiskViolationMean(args.Baseline_num, eval_start)
+        performance_hcrl_lambda_cost += env.get_totalHCRLLambdaCostMean(args.Baseline_num, eval_start)
+        performance_hcrl_lambda_latency += env.get_totalHCRLLambdaLatencyMean(args.Baseline_num, eval_start)
+        performance_hcrl_lambda_risk += env.get_totalHCRLLambdaRiskMean(args.Baseline_num, eval_start)
 
     if episode == 0 and brainDQN is not None and len(brainDQN.reward_list) > 0:
         sns.set_style("darkgrid")
@@ -708,6 +724,9 @@ performance_constraint_violation = np.around(performance_constraint_violation / 
 performance_cost_violation = np.around(performance_cost_violation / divisor, 4)
 performance_latency_violation = np.around(performance_latency_violation / divisor, 4)
 performance_risk_violation = np.around(performance_risk_violation / divisor, 4)
+performance_hcrl_lambda_cost = np.around(performance_hcrl_lambda_cost / divisor, 3)
+performance_hcrl_lambda_latency = np.around(performance_hcrl_lambda_latency / divisor, 3)
+performance_hcrl_lambda_risk = np.around(performance_hcrl_lambda_risk / divisor, 3)
 
 print('method order:')
 print(args.Baselines)
@@ -767,6 +786,12 @@ print('latency_violation_mean:')
 print(performance_latency_violation)
 print('risk_violation_mean:')
 print(performance_risk_violation)
+print('hcrl_lambda_cost_mean:')
+print(performance_hcrl_lambda_cost)
+print('hcrl_lambda_latency_mean:')
+print(performance_hcrl_lambda_latency)
+print('hcrl_lambda_risk_mean:')
+print(performance_hcrl_lambda_risk)
 
 # Save machine-readable final results with the same timestamp prefix as the .txt log.
 final_results_df = pd.DataFrame({
@@ -802,6 +827,9 @@ final_results_df = pd.DataFrame({
     "cost_violation_mean": performance_cost_violation,
     "latency_violation_mean": performance_latency_violation,
     "risk_violation_mean": performance_risk_violation,
+    "hcrl_lambda_cost_mean": performance_hcrl_lambda_cost,
+    "hcrl_lambda_latency_mean": performance_hcrl_lambda_latency,
+    "hcrl_lambda_risk_mean": performance_hcrl_lambda_risk,
 })
 final_results_df.to_csv(RUN_CSV_PATH, index=False, encoding="utf-8-sig")
 

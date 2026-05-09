@@ -367,6 +367,252 @@ class baseline_DQN:
 
 
 
+class OptionActorCritic:
+    """Masked option-level actor-critic policy for HCRL-Oracle.
+
+    This is used by HCRL-Oracle for three learned sub-policies:
+      1) high-level option/mode policy over {single, serial, parallel};
+      2) primary oracle selector;
+      3) backup oracle selector.
+
+    The class intentionally mirrors the lightweight API used by the NumPy DQN
+    classes, so main.py can train the hierarchical policies without TensorFlow.
+    It implements a true actor-critic update: a masked softmax actor is updated
+    with an advantage term, while a value critic is updated toward a one-step TD
+    target.  It also supports teacher warm-start from a DQN-style model by
+    copying the shared representation and mapping the source Q head into the
+    actor logits.
+    """
+
+    def __init__(
+        self,
+        n_actions,
+        n_features,
+        learning_rate=0.001,
+        critic_lr=None,
+        reward_decay=0.9,
+        entropy_coef=0.01,
+        value_coef=0.5,
+        memory_size=5000,
+        batch_size=64,
+        hidden_units=64,
+        scope="OptionAC",
+        reward_clip=3.0,
+        grad_clip=5.0,
+        seed=6,
+    ):
+        self.n_actions = int(n_actions)
+        self.n_features = int(n_features)
+        self.lr = float(learning_rate)
+        self.critic_lr = float(critic_lr if critic_lr is not None else learning_rate)
+        self.gamma = float(reward_decay)
+        self.entropy_coef = float(entropy_coef)
+        self.value_coef = float(value_coef)
+        self.memory_size = int(memory_size)
+        self.batch_size = int(batch_size)
+        self.hidden_units = int(hidden_units)
+        self.scope = scope
+        self.reward_clip = float(reward_clip)
+        self.grad_clip = float(grad_clip)
+        scope_offset = sum(ord(c) for c in str(scope)) % 10000
+        self.rng = np.random.RandomState(seed + scope_offset)
+        self.replay_buffer = deque(maxlen=self.memory_size)
+        self.reward_list = []
+        self.learn_step_counter = 0
+        self.temperature = 1.0
+        self._init_params()
+
+    def _init_params(self):
+        limit1 = np.sqrt(6.0 / (self.n_features + self.hidden_units))
+        self.W1 = self.rng.uniform(-limit1, limit1, (self.n_features, self.hidden_units)).astype(np.float32)
+        self.b1 = np.zeros(self.hidden_units, dtype=np.float32)
+        limit_p = np.sqrt(6.0 / (self.hidden_units + self.n_actions))
+        limit_v = np.sqrt(6.0 / (self.hidden_units + 1))
+        self.Wp = self.rng.uniform(-limit_p, limit_p, (self.hidden_units, self.n_actions)).astype(np.float32)
+        self.bp = np.zeros(self.n_actions, dtype=np.float32)
+        self.Wv = self.rng.uniform(-limit_v, limit_v, (self.hidden_units, 1)).astype(np.float32)
+        self.bv = np.zeros(1, dtype=np.float32)
+
+    def _sanitize_state(self, state):
+        x = np.asarray(state, dtype=np.float32)
+        x = np.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
+        scale = max(float(np.max(np.abs(x))), 1.0)
+        return np.clip(x / scale, -10.0, 10.0).astype(np.float32)
+
+    def _sanitize_mask(self, action_mask=None):
+        if action_mask is None:
+            return np.ones(self.n_actions, dtype=bool)
+        mask = np.asarray(action_mask, dtype=bool)
+        if mask.shape[0] != self.n_actions or not np.any(mask):
+            return np.ones(self.n_actions, dtype=bool)
+        return mask
+
+    def _forward(self, X, return_cache=False):
+        X = np.asarray(X, dtype=np.float32)
+        if X.ndim == 1:
+            X = X[None, :]
+        Z1 = X.dot(self.W1) + self.b1
+        H = np.maximum(Z1, 0.0)
+        logits = H.dot(self.Wp) + self.bp
+        value = H.dot(self.Wv) + self.bv
+        logits = np.nan_to_num(logits, nan=0.0, posinf=30.0, neginf=-30.0)
+        value = np.nan_to_num(value, nan=0.0, posinf=1e3, neginf=-1e3)
+        if return_cache:
+            return logits, value.squeeze(-1), (X, Z1, H)
+        return logits, value.squeeze(-1)
+
+    def _softmax(self, logits, mask=None):
+        logits = np.asarray(logits, dtype=np.float64) / max(float(self.temperature), 1e-6)
+        logits = np.nan_to_num(logits, nan=0.0, posinf=30.0, neginf=-30.0)
+        logits = np.clip(logits, -30.0, 30.0)
+        mask = self._sanitize_mask(mask)
+        logits = np.where(mask, logits, -1e9)
+        logits = logits - np.max(logits)
+        exp_logits = np.exp(logits) * mask.astype(np.float64)
+        denom = np.sum(exp_logits)
+        if denom <= 1e-12 or not np.isfinite(denom):
+            valid = np.where(mask)[0]
+            probs = np.zeros(self.n_actions, dtype=np.float64)
+            probs[valid] = 1.0 / len(valid)
+            return probs
+        probs = exp_logits / denom
+        probs = np.clip(probs, 1e-8, 1.0)
+        probs = probs * mask.astype(np.float64)
+        return probs / np.sum(probs)
+
+    def choose_action(self, observation, action_mask=None):
+        x = self._sanitize_state(observation)
+        logits, _ = self._forward(x)
+        probs = self._softmax(logits[0], action_mask)
+        return int(self.rng.choice(self.n_actions, p=probs))
+
+    def choose_best_action(self, observation, action_mask=None):
+        x = self._sanitize_state(observation)
+        logits, _ = self._forward(x)
+        mask = self._sanitize_mask(action_mask)
+        masked_logits = np.full(self.n_actions, -1e9, dtype=np.float32)
+        masked_logits[mask] = logits[0][mask]
+        return int(np.argmax(masked_logits))
+
+    def store_transition(self, s, a, r, s_, next_action_mask=None, action_mask=None):
+        self.replay_buffer.append((
+            self._sanitize_state(s),
+            int(a),
+            float(np.clip(r, -self.reward_clip, self.reward_clip)),
+            self._sanitize_state(s_),
+            self._sanitize_mask(next_action_mask),
+            self._sanitize_mask(action_mask),
+        ))
+
+    def _clip_grad(self, g):
+        g = np.nan_to_num(g, nan=0.0, posinf=self.grad_clip, neginf=-self.grad_clip)
+        norm = np.linalg.norm(g)
+        if norm > self.grad_clip:
+            g = g * (self.grad_clip / (norm + 1e-8))
+        return g
+
+    def learn(self):
+        if len(self.replay_buffer) < self.batch_size:
+            return
+        minibatch = random.sample(self.replay_buffer, self.batch_size)
+        S = np.asarray([d[0] for d in minibatch], dtype=np.float32)
+        A = np.asarray([d[1] for d in minibatch], dtype=np.int32)
+        R = np.asarray([d[2] for d in minibatch], dtype=np.float32)
+        S2 = np.asarray([d[3] for d in minibatch], dtype=np.float32)
+        next_masks = np.asarray([d[4] for d in minibatch], dtype=bool)
+        masks = np.asarray([d[5] for d in minibatch], dtype=bool)
+
+        logits, values, cache = self._forward(S, return_cache=True)
+        _, next_values = self._forward(S2)
+        targets = R + self.gamma * next_values
+        targets = np.clip(np.nan_to_num(targets, nan=0.0, posinf=self.reward_clip, neginf=-self.reward_clip), -self.reward_clip, self.reward_clip)
+        advantages = targets - values
+        adv_norm = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-8)
+        adv_norm = np.clip(adv_norm, -5.0, 5.0).astype(np.float32)
+
+        probs = np.vstack([self._softmax(row, mask) for row, mask in zip(logits, masks)]).astype(np.float32)
+        one_hot = np.zeros_like(probs, dtype=np.float32)
+        one_hot[np.arange(self.batch_size), A] = 1.0
+
+        # Actor gradient for log pi(a|s) * advantage, with a small entropy term.
+        valid_counts = np.maximum(np.sum(masks, axis=1, keepdims=True), 1)
+        uniform = masks.astype(np.float32) / valid_counts
+        dlogits = ((one_hot - probs) * adv_norm[:, None] + self.entropy_coef * (uniform - probs)) / self.batch_size
+        dlogits *= masks.astype(np.float32)
+
+        X, Z1, H = cache
+        gWp = H.T.dot(dlogits); gbp = np.sum(dlogits, axis=0)
+
+        # Critic gradient: 0.5 * (V - target)^2.
+        dvalue = ((values - targets) / self.batch_size).astype(np.float32)[:, None]
+        gWv = H.T.dot(dvalue); gbv = np.sum(dvalue, axis=0)
+
+        # Shared representation receives actor ascent and critic descent signals.
+        dH = dlogits.dot(self.Wp.T) - self.value_coef * dvalue.dot(self.Wv.T)
+        dZ1 = dH * (Z1 > 0)
+        gW1 = X.T.dot(dZ1); gb1 = np.sum(dZ1, axis=0)
+
+        self.W1 += self.lr * self._clip_grad(gW1).astype(np.float32)
+        self.b1 += self.lr * self._clip_grad(gb1).astype(np.float32)
+        self.Wp += self.lr * self._clip_grad(gWp).astype(np.float32)
+        self.bp += self.lr * self._clip_grad(gbp).astype(np.float32)
+        self.Wv -= self.critic_lr * self._clip_grad(gWv).astype(np.float32)
+        self.bv -= self.critic_lr * self._clip_grad(gbv).astype(np.float32)
+
+        for name in ["W1", "b1", "Wp", "bp", "Wv", "bv"]:
+            setattr(self, name, np.nan_to_num(getattr(self, name), nan=0.0, posinf=1.0, neginf=-1.0).astype(np.float32))
+        self.reward_list.append(float(np.mean(R)))
+        self.learn_step_counter += 1
+
+    def copy_from(self, other, copy_optimizer_state=False):
+        if other is None:
+            return False
+        if getattr(other, "n_features", None) != self.n_features or getattr(other, "n_actions", None) != self.n_actions:
+            return False
+        self.W1 = other.W1.copy(); self.b1 = other.b1.copy()
+        if getattr(other, "dueling", False):
+            self.Wp = other.Wa.copy(); self.bp = other.ba.copy()
+        elif hasattr(other, "W2"):
+            self.Wp = other.W2.copy(); self.bp = other.b2.copy()
+        else:
+            return False
+        self.Wv = np.zeros_like(self.Wv); self.bv = np.zeros_like(self.bv)
+        return True
+
+    def set_epsilon(self, value):
+        # Actor-critic is stochastic by construction; this hook is kept for API
+        # compatibility with teacher warm-start code.
+        self.temperature = float(np.clip(1.0 - 0.5 * value, 0.35, 1.0))
+
+    def save_model(self, path, metadata=None):
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        np.savez_compressed(
+            path,
+            model_type=np.array("OptionActorCritic"),
+            scope=np.array(str(self.scope)),
+            n_actions=np.array(self.n_actions),
+            n_features=np.array(self.n_features),
+            hidden_units=np.array(self.hidden_units),
+            actor_lr=np.array(self.lr),
+            critic_lr=np.array(self.critic_lr),
+            gamma=np.array(self.gamma),
+            entropy_coef=np.array(self.entropy_coef),
+            value_coef=np.array(self.value_coef),
+            learn_step_counter=np.array(self.learn_step_counter),
+            W1=self.W1,
+            b1=self.b1,
+            Wp=self.Wp,
+            bp=self.bp,
+            Wv=self.Wv,
+            bv=self.bv,
+            reward_list=np.asarray(self.reward_list, dtype=np.float32),
+            metadata=np.array(str(metadata or {})),
+        )
+        return path
+
+
 class DuelingDoubleDQN(baseline_DQN):
     def __init__(self, n_actions, n_features, hidden_units=64, scope="RA_DDQN", learning_rate=0.002, **kwargs):
         super().__init__(
