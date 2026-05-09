@@ -15,6 +15,7 @@ def parameter_parser():
     parser.add_argument("--Epoch", type=int, default=10, help="Training episodes")
     parser.add_argument("--Seed", type=int, default=6, help="Random seed for Python/NumPy/TensorFlow")
     parser.add_argument("--Output_Dir", type=str, default="output", help="Output directory. Relative paths are resolved from the current working directory, so results are saved in the repository folder you run from.")
+    parser.add_argument("--Run_Tag", type=str, default="", help="Optional short tag appended to run folder names, useful for seed/ablation groups.")
 
     # DQN
     parser.add_argument("--Dqn_start_learn", type=int, default=300, help="Iteration to start DQN learning")
@@ -119,6 +120,61 @@ def parameter_parser():
                         help="Ablation: disable teacher warm-start and teacher action guidance")
     parser.add_argument("--COBRA_No_Decoupled_Reward", action="store_true",
                         help="Ablation: train COBRA primary with final reward instead of primary-only reward")
+
+    # HCRL-Oracle: hierarchical constrained RL committee selection.
+    parser.add_argument("--Use_HCRL", action="store_true",
+                        help="Append HCRL-Oracle: hierarchical constrained RL for oracle committee selection")
+    parser.add_argument("--HCRL_lr", type=float, default=0.0013,
+                        help="Learning rate for HCRL primary and backup selectors")
+    parser.add_argument("--HCRL_Mode_lr", type=float, default=0.0010,
+                        help="Learning rate for HCRL high-level mode policy")
+    parser.add_argument("--HCRL_start_learn", type=int, default=200)
+    parser.add_argument("--HCRL_learn_interval", type=int, default=1)
+    parser.add_argument("--HCRL_Backup_learn_interval", type=int, default=1)
+    parser.add_argument("--HCRL_Mode_learn_interval", type=int, default=1)
+    parser.add_argument("--HCRL_Teacher_Source", choices=["DQN", "RA-DDQN", "COBRA-Oracle", "none"], default="DQN",
+                        help="Teacher used to warm-start HCRL primary selector")
+    parser.add_argument("--HCRL_WarmStart_Episode", type=int, default=3)
+    parser.add_argument("--HCRL_Teacher_Guidance_Episodes", type=int, default=8)
+    parser.add_argument("--HCRL_Teacher_Start_Prob", type=float, default=0.70)
+    parser.add_argument("--HCRL_Min_Teacher_Prob", type=float, default=0.03)
+    parser.add_argument("--HCRL_Mode_Start_Prob", type=float, default=0.10,
+                        help="Early probability of using a conservative single-mode teacher in HCRL")
+    parser.add_argument("--HCRL_Mode_Min_Prob", type=float, default=0.03)
+    parser.add_argument("--HCRL_Primary_Success_Bonus", type=float, default=0.30)
+    parser.add_argument("--HCRL_Backup_Recovery_Bonus", type=float, default=0.40)
+    parser.add_argument("--HCRL_Backup_Used_Penalty", type=float, default=0.20)
+    parser.add_argument("--HCRL_Unnecessary_Backup_Penalty", type=float, default=0.32,
+                        help="Penalty when HCRL uses a backup but the primary already succeeds")
+    parser.add_argument("--HCRL_Skip_Recovery_Penalty", type=float, default=0.08,
+                        help="Penalty when single mode is selected and primary fails")
+    parser.add_argument("--HCRL_Primary_Malicious_Penalty", type=float, default=0.35)
+    parser.add_argument("--HCRL_Backup_Malicious_Penalty", type=float, default=0.50)
+    parser.add_argument("--HCRL_Backup_Guidance_Episodes", type=int, default=10,
+                        help="Use observable safety-score backup teacher for the first N episodes")
+    parser.add_argument("--HCRL_Backup_Start_Prob", type=float, default=0.85)
+    parser.add_argument("--HCRL_Backup_Min_Prob", type=float, default=0.05)
+    parser.add_argument("--HCRL_Cost_Budget", type=float, default=1.02)
+    parser.add_argument("--HCRL_Latency_Budget", type=float, default=5.95)
+    parser.add_argument("--HCRL_Risk_Budget", type=float, default=0.06)
+    parser.add_argument("--HCRL_Lambda_Cost", type=float, default=0.55)
+    parser.add_argument("--HCRL_Lambda_Latency", type=float, default=0.40)
+    parser.add_argument("--HCRL_Lambda_Risk", type=float, default=0.80)
+    parser.add_argument("--HCRL_Parallel_Cost_Discount", type=float, default=0.85,
+                        help="Effective cost multiplier for parallel warm-standby backup, modeling shared query overhead")
+    parser.add_argument("--HCRL_Mode_Names", nargs="+", default=["single", "serial", "parallel"],
+                        help="Mode order for HCRL high-level policy. Do not change unless modifying code.")
+    parser.add_argument("--HCRL_No_Teacher", action="store_true")
+    parser.add_argument("--HCRL_No_Constrained", action="store_true",
+                        help="Ablation: disable cost/latency/risk Lagrangian penalties")
+    parser.add_argument("--HCRL_No_Decoupled_Reward", action="store_true",
+                        help="Ablation: train all HCRL sub-policies with the same final reward")
+    parser.add_argument("--HCRL_Random_Backup", action="store_true",
+                        help="Ablation: HCRL backup selector chooses a random same-type backup")
+    parser.add_argument("--HCRL_Fixed_Single_Mode", action="store_true",
+                        help="Ablation: force HCRL mode to single-oracle")
+    parser.add_argument("--HCRL_Fixed_Parallel_Mode", action="store_true",
+                        help="Ablation: force HCRL mode to parallel committee")
 
     # Oracle Settings. These defaults are overwritten by the scalable generator below.
     parser.add_argument("--Oracle_Type", type=list, default=[0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2], help="Oracle Type")
@@ -240,9 +296,14 @@ def parameter_parser():
         args.Baselines.append("PB-SafeDQN")
     if args.Use_COBRA and "COBRA-Oracle" not in args.Baselines:
         args.Baselines.append("COBRA-Oracle")
+    if args.Use_HCRL and "HCRL-Oracle" not in args.Baselines:
+        args.Baselines.append("HCRL-Oracle")
     if args.COBRA_No_Teacher:
         args.COBRA_Teacher_Source = "none"
         args.COBRA_Teacher_Start_Prob = 0.0
+    if args.HCRL_No_Teacher:
+        args.HCRL_Teacher_Source = "none"
+        args.HCRL_Teacher_Start_Prob = 0.0
 
     # Auto-generate scalable oracle community.
     # Role pattern matches the original 15-node setup: each service type has malicious, trusted, normal, trusted, trusted.

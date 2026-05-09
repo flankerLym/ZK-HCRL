@@ -83,12 +83,17 @@ class SchedulingEnv:
             self.oracle_reputation_history[name] = np.zeros((self.timeperiodNum, self.oracleNum))
             self.reputation_timewindow[name] = np.zeros((0, self.oracleNum))
 
-        # Primary-backup diagnostic records. Rows:
+        # Primary-backup / committee diagnostic records. Rows:
         # 0 primary_success, 1 backup_used, 2 backup_success, 3 backup_recovery,
         # 4 primary_action, 5 backup_action, 6 primary_malicious, 7 backup_malicious,
         # 8 primary_trusted, 9 backup_trusted, 10 backup_skipped_by_trigger,
-        # 11 selected_backup_score. Values remain zero for non-PB policies.
-        self.pb_records = {name: np.zeros((12, self.requestNum)) for name in self.policy_names}
+        # 11 selected_backup_score,
+        # 12 HCRL mode index (0=single,1=serial,2=parallel),
+        # 13 single_mode flag, 14 serial_mode flag, 15 parallel_mode flag,
+        # 16 constraint violation flag, 17 cost violation magnitude,
+        # 18 latency violation magnitude, 19 risk violation magnitude.
+        # Values remain zero for non-primary-backup policies.
+        self.pb_records = {name: np.zeros((20, self.requestNum)) for name in self.policy_names}
         for name in self.policy_names:
             self.pb_records[name][4, :] = -1
             self.pb_records[name][5, :] = -1
@@ -451,6 +456,260 @@ class SchedulingEnv:
         if getattr(self.args, "PB_Backup_Trigger", "cost_aware") == "always":
             return True
         return float(backup_score) >= float(getattr(self.args, "PB_Min_Backup_Score", 0.38))
+
+    def get_backup_action_mask(self, request_attrs, primary_action):
+        """Valid backup actions: same request type, not equal to the primary."""
+        mask = self.get_action_mask(request_attrs).astype(bool)
+        if 0 <= int(primary_action) < self.oracleNum:
+            mask[int(primary_action)] = False
+        if not np.any(mask):
+            mask = np.ones(self.oracleNum, dtype=bool)
+            if 0 <= int(primary_action) < self.oracleNum:
+                mask[int(primary_action)] = False
+        if not np.any(mask):
+            mask = np.ones(self.oracleNum, dtype=bool)
+        return mask.astype(bool)
+
+    def get_hcrl_mode_state(self, request_attrs, policy_name):
+        """High-level state for HCRL's mode policy.
+
+        It augments the ordinary oracle-selection state with budget and recent
+        policy-level diagnostics so the high-level policy can learn when to use
+        single, serial-backup, or parallel-committee recovery.
+        """
+        base = self.getState(request_attrs, policy_name)
+        start = max(0, int(request_attrs[0]) - self.timeperiodSize)
+        end = max(start + 1, int(request_attrs[0]))
+        recent_cost = float(np.mean(self.events[policy_name][8, start:end])) if end > start else 0.0
+        recent_success = float(np.mean(self.events[policy_name][7, start:end])) if end > start else 0.0
+        recent_latency = float(np.mean(self.events[policy_name][3, start:end])) if end > start else 0.0
+        recent_mal = 0.0
+        if end > start:
+            primary_mal = self.pb_records[policy_name][6, start:end]
+            backup_mal = self.pb_records[policy_name][7, start:end]
+            recent_mal = float(np.mean(np.maximum(primary_mal, backup_mal)))
+        budget_state = np.array([
+            recent_success,
+            recent_cost / max(float(getattr(self.args, "HCRL_Cost_Budget", 1.0)), 1e-8),
+            recent_latency / max(float(getattr(self.args, "HCRL_Latency_Budget", 6.0)), 1e-8),
+            recent_mal,
+            float(getattr(self.args, "HCRL_Cost_Budget", 1.0)),
+            float(getattr(self.args, "HCRL_Risk_Budget", 0.06)),
+        ], dtype=float)
+        return np.hstack((base, budget_state))
+
+    def _record_attempt_updates(self, policy_name, attempts):
+        """Update oracle/reputation records for one or more oracle attempts."""
+        for attempt in attempts:
+            if attempt is None:
+                continue
+            action = int(attempt["action"])
+            oe = self.oracle_events[policy_name]
+            oe[1, action] += 1
+            oe[0, action] = max(oe[0, action], attempt["leaveT"])
+            oe[3, action] += attempt["match"]
+            oe[4, action] += attempt["validation_raw"]
+
+            rf = self.reputation_factors[policy_name]
+            rf[0, action] += 1
+            rf[1, action] += attempt["validation_raw"]
+            rf[2, action] += attempt["durationT"]
+            rf[3, action] += attempt["behavior_record"]
+
+    def feedback_hcrl(self, request_attrs, mode_action, primary_action, backup_action, policy_name="HCRL-Oracle"):
+        """Hierarchical Constrained RL feedback.
+
+        HCRL learns a high-level recovery mode and two low-level selectors:
+        mode 0 = single oracle, mode 1 = serial backup after primary failure,
+        mode 2 = parallel warm-standby committee.  Unlike COBRA's heuristic
+        backup gate, the backup oracle is selected by a learned backup Q-policy
+        and the high-level mode is also learned.  The environment returns
+        separate rewards for mode, primary, and backup policies, enabling
+        counterfactual-style credit assignment.
+        """
+        if policy_name not in self.policy_names:
+            raise ValueError(f"Unknown policy_name: {policy_name}")
+        request_id, arrival_time, length, request_type, ddl = request_attrs
+        request_id = int(request_id)
+        ddl = float(ddl)
+        mode_action = int(np.clip(mode_action, 0, 2))
+        primary_action = int(primary_action)
+        backup_action = int(backup_action) if int(backup_action) >= 0 else -1
+
+        primary = self._simulate_oracle_attempt(request_attrs, primary_action, policy_name)
+        primary_success = 1 if (primary["durationT"] <= ddl and primary["match"] == 1 and primary["validation_raw"] == 1) else 0
+
+        backup_used = 0
+        backup_success = 0
+        backup_recovery = 0
+        backup_skipped = 0
+        backup = None
+        backup_score = 0.0
+        final_duration = primary["durationT"]
+        final_leaveT = primary["leaveT"]
+        effective_total_cost = primary["cost"]
+        accounting_total_cost = primary["cost"]
+        final_success = primary_success
+        combined_behavior = primary["behavior_record"]
+        combined_rep = primary["reputation"]
+
+        if backup_action >= 0 and backup_action != primary_action:
+            score_vec = self._backup_score_vector(request_attrs, primary_action, policy_name)
+            backup_score = float(score_vec[backup_action])
+
+        # Mode 1: serial recovery only after primary failure.
+        if mode_action == 1 and primary_success == 0 and backup_action >= 0 and backup_action != primary_action:
+            # Serial backup must still fit within the remaining deadline.
+            estimated_exe = float(length) / max(float(self.oracleAcc[backup_action]), 1e-8)
+            remaining = ddl - float(primary["durationT"])
+            if remaining > 0 and estimated_exe <= remaining:
+                backup_used = 1
+                backup = self._simulate_oracle_attempt(request_attrs, backup_action, policy_name, arrival_override=primary["leaveT"])
+                final_duration = primary["durationT"] + backup["durationT"]
+                final_leaveT = backup["leaveT"]
+                accounting_total_cost += backup["cost"]
+                effective_total_cost += backup["cost"]
+                combined_behavior = max(float(primary["behavior_record"]), float(backup["behavior_record"]))
+                combined_rep = 0.5 * (float(primary["reputation"]) + float(backup["reputation"]))
+                backup_success = 1 if (final_duration <= ddl and backup["match"] == 1 and backup["validation_raw"] == 1) else 0
+                backup_recovery = 1 if backup_success == 1 else 0
+                final_success = 1 if backup_recovery else 0
+            else:
+                backup_skipped = 1
+        elif mode_action == 1 and primary_success == 0:
+            backup_skipped = 1
+
+        # Mode 2: parallel warm-standby committee. The backup is queried in
+        # parallel; it can recover if the primary fails, while a discount models
+        # shared request/gas overhead in a committee-style call.
+        if mode_action == 2 and backup_action >= 0 and backup_action != primary_action:
+            backup_used = 1
+            backup = self._simulate_oracle_attempt(request_attrs, backup_action, policy_name, arrival_override=arrival_time)
+            final_duration = max(primary["durationT"], backup["durationT"])
+            final_leaveT = float(arrival_time) + final_duration
+            discount = float(getattr(self.args, "HCRL_Parallel_Cost_Discount", 0.85))
+            accounting_total_cost += backup["cost"]
+            effective_total_cost += discount * backup["cost"]
+            combined_behavior = max(float(primary["behavior_record"]), float(backup["behavior_record"]))
+            combined_rep = 0.5 * (float(primary["reputation"]) + float(backup["reputation"]))
+            backup_success = 1 if (final_duration <= ddl and backup["match"] == 1 and backup["validation_raw"] == 1) else 0
+            backup_recovery = 1 if (primary_success == 0 and backup_success == 1) else 0
+            final_success = 1 if (primary_success == 1 or backup_success == 1) else 0
+
+        final_match = primary["match"] if primary_success else (backup["match"] if backup is not None else primary["match"])
+        final_reward = self._risk_aware_reward(
+            combined_rep,
+            final_match,
+            final_success,
+            effective_total_cost,
+            final_duration,
+            ddl,
+            combined_behavior,
+        )
+
+        primary_mal = float(primary["is_malicious"])
+        backup_mal = float(backup["is_malicious"]) if backup is not None else 0.0
+        risk_indicator = max(primary_mal, backup_mal)
+        cost_violation = max(0.0, float(effective_total_cost) - float(getattr(self.args, "HCRL_Cost_Budget", 1.02)))
+        latency_violation = max(0.0, float(final_duration) - float(getattr(self.args, "HCRL_Latency_Budget", 5.95))) / max(ddl, 1e-8)
+        risk_violation = max(0.0, risk_indicator - float(getattr(self.args, "HCRL_Risk_Budget", 0.06)))
+        constraint_violation = 1.0 if (cost_violation > 0 or latency_violation > 0 or risk_violation > 0) else 0.0
+
+        if not getattr(self.args, "HCRL_No_Constrained", False):
+            final_reward -= float(getattr(self.args, "HCRL_Lambda_Cost", 0.55)) * cost_violation
+            final_reward -= float(getattr(self.args, "HCRL_Lambda_Latency", 0.40)) * latency_violation
+            final_reward -= float(getattr(self.args, "HCRL_Lambda_Risk", 0.80)) * risk_violation
+
+        # Mode policy reward: final system utility minus mode-specific overhead.
+        mode_reward = final_reward
+        mode_reward += float(getattr(self.args, "HCRL_Primary_Success_Bonus", 0.30)) * primary_success
+        mode_reward += float(getattr(self.args, "HCRL_Backup_Recovery_Bonus", 0.40)) * backup_recovery
+        mode_reward -= float(getattr(self.args, "HCRL_Backup_Used_Penalty", 0.20)) * backup_used
+        if backup_used == 1 and primary_success == 1:
+            mode_reward -= float(getattr(self.args, "HCRL_Unnecessary_Backup_Penalty", 0.32))
+        if mode_action == 0 and primary_success == 0:
+            mode_reward -= float(getattr(self.args, "HCRL_Skip_Recovery_Penalty", 0.08))
+
+        primary_reward = self._risk_aware_reward(
+            primary["reputation"], primary["match"], primary_success,
+            primary["cost"], primary["durationT"], ddl, primary["behavior_record"],
+        )
+        primary_reward += float(getattr(self.args, "HCRL_Primary_Success_Bonus", 0.30)) * primary_success
+        primary_reward -= float(getattr(self.args, "HCRL_Primary_Malicious_Penalty", 0.35)) * primary_mal
+        primary_reward -= 0.10 * (1.0 - primary_success)
+
+        backup_reward = 0.0
+        if backup_used == 1 and backup is not None:
+            backup_reward = self._risk_aware_reward(
+                backup["reputation"], backup["match"], backup_success,
+                backup["cost"], backup["durationT"], ddl, backup["behavior_record"],
+            )
+            backup_reward += float(getattr(self.args, "HCRL_Backup_Recovery_Bonus", 0.40)) * backup_recovery
+            backup_reward -= float(getattr(self.args, "HCRL_Backup_Used_Penalty", 0.20))
+            backup_reward -= float(getattr(self.args, "HCRL_Backup_Malicious_Penalty", 0.50)) * backup_mal
+            if primary_success == 1:
+                backup_reward -= float(getattr(self.args, "HCRL_Unnecessary_Backup_Penalty", 0.32))
+        elif mode_action in [1, 2] and primary_success == 0:
+            backup_reward -= float(getattr(self.args, "HCRL_Skip_Recovery_Penalty", 0.08))
+
+        if getattr(self.args, "HCRL_No_Decoupled_Reward", False):
+            primary_reward = final_reward
+            backup_reward = final_reward
+            mode_reward = final_reward
+
+        final_reward = float(np.clip(final_reward, -self.args.Reward_Clip, self.args.Reward_Clip))
+        primary_reward = float(np.clip(primary_reward, -self.args.Reward_Clip, self.args.Reward_Clip))
+        backup_reward = float(np.clip(backup_reward, -self.args.Reward_Clip, self.args.Reward_Clip))
+        mode_reward = float(np.clip(mode_reward, -self.args.Reward_Clip, self.args.Reward_Clip))
+
+        ev = self.events[policy_name]
+        ev[0, request_id] = primary["action"]
+        ev[1, request_id] = primary["startT"]
+        ev[2, request_id] = primary["waitT"]
+        ev[3, request_id] = final_duration
+        ev[4, request_id] = final_leaveT
+        ev[5, request_id] = final_reward
+        ev[6, request_id] = primary["exeT"]
+        ev[7, request_id] = final_success
+        ev[8, request_id] = effective_total_cost
+        ev[9, request_id] = 1 if final_duration <= ddl else 0
+
+        self._record_attempt_updates(policy_name, [primary, backup] if backup is not None else [primary])
+
+        pb = self.pb_records[policy_name]
+        pb[0, request_id] = primary_success
+        pb[1, request_id] = backup_used
+        pb[2, request_id] = backup_success
+        pb[3, request_id] = backup_recovery
+        pb[4, request_id] = primary["action"]
+        pb[5, request_id] = backup_action
+        pb[6, request_id] = primary["is_malicious"]
+        pb[7, request_id] = backup["is_malicious"] if backup is not None else 0
+        pb[8, request_id] = primary["is_trusted"]
+        pb[9, request_id] = backup["is_trusted"] if backup is not None else 0
+        pb[10, request_id] = backup_skipped
+        pb[11, request_id] = backup_score
+        pb[12, request_id] = mode_action
+        pb[13, request_id] = 1 if mode_action == 0 else 0
+        pb[14, request_id] = 1 if mode_action == 1 else 0
+        pb[15, request_id] = 1 if mode_action == 2 else 0
+        pb[16, request_id] = constraint_violation
+        pb[17, request_id] = cost_violation
+        pb[18, request_id] = latency_violation
+        pb[19, request_id] = risk_violation
+        if primary_success == 0 and backup_action >= 0:
+            self.backup_score_history.setdefault(policy_name, []).append(float(backup_score))
+
+        return {
+            "final_reward": final_reward,
+            "mode_reward": mode_reward,
+            "primary_reward": primary_reward,
+            "backup_reward": backup_reward,
+            "backup_used": backup_used,
+            "mode_action": mode_action,
+            "primary_success": primary_success,
+            "backup_recovery": backup_recovery,
+        }
 
     def feedback_primary_backup(self, request_attrs, primary_action, policy_name="PB-SafeDQN"):
         """Primary-backup failover feedback for PB-SafeDQN.
@@ -934,6 +1193,41 @@ class SchedulingEnv:
 
     def get_totalBackupTrustedNum(self, policies, start=0):
         return self._pb_count(9, start)
+
+    def get_totalHCRLSingleModeRate(self, policies, start=0):
+        return self._pb_rate(13, start)
+
+    def get_totalHCRLSerialModeRate(self, policies, start=0):
+        return self._pb_rate(14, start)
+
+    def get_totalHCRLParallelModeRate(self, policies, start=0):
+        return self._pb_rate(15, start)
+
+    def get_totalConstraintViolationRate(self, policies, start=0):
+        return self._pb_rate(16, start)
+
+    def get_totalCostViolationMean(self, policies, start=0):
+        start = min(max(int(start), 0), self.requestNum - 1)
+        denom = max(self.requestNum - start, 1)
+        return np.around(self._metric_array(lambda n: np.sum(self.pb_records[n][17, start:self.requestNum]) / denom), 4)
+
+    def get_totalLatencyViolationMean(self, policies, start=0):
+        start = min(max(int(start), 0), self.requestNum - 1)
+        denom = max(self.requestNum - start, 1)
+        return np.around(self._metric_array(lambda n: np.sum(self.pb_records[n][18, start:self.requestNum]) / denom), 4)
+
+    def get_totalRiskViolationMean(self, policies, start=0):
+        start = min(max(int(start), 0), self.requestNum - 1)
+        denom = max(self.requestNum - start, 1)
+        return np.around(self._metric_array(lambda n: np.sum(self.pb_records[n][19, start:self.requestNum]) / denom), 4)
+
+    def get_totalCostPerSuccess(self, policies, start=0):
+        start = min(max(int(start), 0), self.requestNum - 1)
+        def _cps(policy_name):
+            total_cost = float(np.sum(self.events[policy_name][8, start:self.requestNum]))
+            total_success = float(np.sum(self.events[policy_name][7, start:self.requestNum]))
+            return total_cost / max(total_success, 1.0)
+        return np.around(self._metric_array(_cps), 5)
 
     def get_totalMatchRate(self, policies, start=0):
         start = min(max(int(start), 0), self.requestNum - 1)

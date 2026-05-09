@@ -76,10 +76,13 @@ sys.stdout = _pre_arg_stdout
 sys.stderr = _pre_arg_stderr
 
 _run_now = datetime.now()
+_tag = str(getattr(args, "Run_Tag", "")).strip()
+_tag_part = f"_{_tag}" if _tag else ""
 RUN_ID = (
     f"{_run_now.year % 100}_{_run_now.month}_{_run_now.day}_"
     f"{_run_now.hour:02d}_{_run_now.minute:02d}_"
-    f"Epoch{args.Epoch}_Req{args.Request_Num}_{args.Scenario}"
+    f"Epoch{args.Epoch}_Req{args.Request_Num}_{args.Scenario}_"
+    f"Seed{args.Seed}{_tag_part}"
 )
 # Resolve output directory from the command working directory.
 # This fixes cases where files were saved into a downloaded zip/replacement path.
@@ -134,6 +137,14 @@ performance_primary_malicious_num = np.zeros(args.Baseline_num)
 performance_backup_malicious_num = np.zeros(args.Baseline_num)
 performance_primary_trusted_num = np.zeros(args.Baseline_num)
 performance_backup_trusted_num = np.zeros(args.Baseline_num)
+performance_cost_per_success = np.zeros(args.Baseline_num)
+performance_hcrl_single_mode = np.zeros(args.Baseline_num)
+performance_hcrl_serial_mode = np.zeros(args.Baseline_num)
+performance_hcrl_parallel_mode = np.zeros(args.Baseline_num)
+performance_constraint_violation = np.zeros(args.Baseline_num)
+performance_cost_violation = np.zeros(args.Baseline_num)
+performance_latency_violation = np.zeros(args.Baseline_num)
+performance_risk_violation = np.zeros(args.Baseline_num)
 
 # Generate environment.
 env = SchedulingEnv(args)
@@ -145,7 +156,11 @@ brainPPO = None
 brainRA = None
 brainPB = None
 brainCOBRA = None
+brainHCRLMode = None
+brainHCRLPrimary = None
+brainHCRLBackup = None
 cobra_warm_started = False
+hcrl_warm_started = False
 
 if "DQN" in args.Baselines:
     brainDQN = baseline_DQN(
@@ -210,6 +225,45 @@ if "COBRA-Oracle" in args.Baselines:
         seed=args.Seed + 2027,
     )
 
+if "HCRL-Oracle" in args.Baselines:
+    # HCRL uses three learned policies:
+    # 1) high-level mode policy over {single, serial, parallel};
+    # 2) low-level primary selector;
+    # 3) low-level backup selector.
+    brainHCRLMode = DuelingDoubleDQN(
+        3, env.s_features + 6,
+        hidden_units=max(64, args.Dqn_hidden // 2),
+        scope="HCRL_Mode",
+        learning_rate=args.HCRL_Mode_lr,
+        memory_size=args.Dqn_memory_size,
+        batch_size=args.Dqn_batch_size,
+        e_greedy_increment=args.Dqn_epsilon_increment,
+        reward_clip=args.Reward_Clip,
+        seed=args.Seed + 3031,
+    )
+    brainHCRLPrimary = DuelingDoubleDQN(
+        env.actionNum, env.s_features,
+        hidden_units=args.Dqn_hidden,
+        scope="HCRL_Primary",
+        learning_rate=args.HCRL_lr,
+        memory_size=args.Dqn_memory_size,
+        batch_size=args.Dqn_batch_size,
+        e_greedy_increment=args.Dqn_epsilon_increment,
+        reward_clip=args.Reward_Clip,
+        seed=args.Seed + 4049,
+    )
+    brainHCRLBackup = DuelingDoubleDQN(
+        env.actionNum, env.s_features,
+        hidden_units=args.Dqn_hidden,
+        scope="HCRL_Backup",
+        learning_rate=args.HCRL_lr,
+        memory_size=args.Dqn_memory_size,
+        batch_size=args.Dqn_batch_size,
+        e_greedy_increment=args.Dqn_epsilon_increment,
+        reward_clip=args.Reward_Clip,
+        seed=args.Seed + 5051,
+    )
+
 global_step = 0
 # Use one consistent evaluation window for per-episode and final summaries.
 # This excludes the warm-up/exploration prefix when Request_Num is small.
@@ -231,6 +285,9 @@ for episode in range(args.Epoch):
     has_last_ra = False
     has_last_pb = False
     has_last_cobra = False
+    has_last_hcrl_mode = False
+    has_last_hcrl_primary = False
+    has_last_hcrl_backup = False
 
     if brainDQN is not None:
         brainDQN.reward_list.clear()
@@ -242,6 +299,12 @@ for episode in range(args.Epoch):
         brainPB.reward_list.clear()
     if brainCOBRA is not None:
         brainCOBRA.reward_list.clear()
+    if brainHCRLMode is not None:
+        brainHCRLMode.reward_list.clear()
+    if brainHCRLPrimary is not None:
+        brainHCRLPrimary.reward_list.clear()
+    if brainHCRLBackup is not None:
+        brainHCRLBackup.reward_list.clear()
 
     # Teacher-guided warm-start for COBRA. This copies the current teacher
     # representation into COBRA once, after the teacher has had several
@@ -256,6 +319,21 @@ for episode in range(args.Epoch):
             brainCOBRA.set_epsilon(min(getattr(teacher_model, "epsilon", 0.2), 0.35))
             cobra_warm_started = True
             print(f"[COBRA] warm-started primary selector from {args.COBRA_Teacher_Source} at episode {episode}")
+
+    # Teacher-guided warm-start for HCRL primary. This directly addresses
+    # weak-primary behavior in earlier PB variants.
+    if brainHCRLPrimary is not None and (not hcrl_warm_started) and (not args.HCRL_No_Teacher) and episode >= args.HCRL_WarmStart_Episode:
+        teacher_model = None
+        if args.HCRL_Teacher_Source == "DQN":
+            teacher_model = brainDQN
+        elif args.HCRL_Teacher_Source == "RA-DDQN":
+            teacher_model = brainRA
+        elif args.HCRL_Teacher_Source == "COBRA-Oracle":
+            teacher_model = brainCOBRA
+        if teacher_model is not None and brainHCRLPrimary.copy_from(teacher_model, copy_optimizer_state=False):
+            brainHCRLPrimary.set_epsilon(min(getattr(teacher_model, "epsilon", 0.2), 0.30))
+            hcrl_warm_started = True
+            print(f"[HCRL] warm-started primary selector from {args.HCRL_Teacher_Source} at episode {episode}")
 
     while True:
         # Update reputation every Time_Period_Size requests.
@@ -405,6 +483,107 @@ for episode in range(args.Epoch):
             last_cobra_reward = reward_COBRA
             has_last_cobra = True
 
+        # HCRL-Oracle: learned high-level mode + learned primary + learned backup.
+        if brainHCRLPrimary is not None:
+            hcrl_state = env.getState(request_attrs, "HCRL-Oracle")
+            hcrl_mode_state = env.get_hcrl_mode_state(request_attrs, "HCRL-Oracle")
+            hcrl_primary_mask = env.get_action_mask(request_attrs)
+            hcrl_mode_mask = np.ones(3, dtype=bool)
+
+            # Select high-level recovery mode.
+            if getattr(args, "HCRL_Fixed_Single_Mode", False):
+                mode_HCRL = 0
+            elif getattr(args, "HCRL_Fixed_Parallel_Mode", False):
+                mode_HCRL = 2
+            else:
+                # Early conservative guidance: prefer single mode while the primary teacher
+                # is being transferred, then let the mode Q-policy decide.
+                mode_teacher_prob = 0.0
+                if episode < args.HCRL_Teacher_Guidance_Episodes:
+                    frac_m = max(0.0, 1.0 - episode / max(args.HCRL_Teacher_Guidance_Episodes, 1))
+                    mode_teacher_prob = max(args.HCRL_Mode_Min_Prob, args.HCRL_Mode_Start_Prob * frac_m)
+                if np.random.rand() < mode_teacher_prob:
+                    mode_HCRL = 0
+                else:
+                    mode_HCRL = brainHCRLMode.choose_action(hcrl_mode_state, hcrl_mode_mask)
+
+            # Select primary oracle, optionally teacher-guided.
+            teacher_action = None
+            if (not args.HCRL_No_Teacher) and episode < args.HCRL_Teacher_Guidance_Episodes:
+                teacher_model = None
+                if args.HCRL_Teacher_Source == "DQN":
+                    teacher_model = brainDQN
+                elif args.HCRL_Teacher_Source == "RA-DDQN":
+                    teacher_model = brainRA
+                elif args.HCRL_Teacher_Source == "COBRA-Oracle":
+                    teacher_model = brainCOBRA
+                if teacher_model is not None:
+                    teacher_action = teacher_model.choose_best_action(hcrl_state, hcrl_primary_mask)
+            if teacher_action is not None:
+                frac = max(0.0, 1.0 - episode / max(args.HCRL_Teacher_Guidance_Episodes, 1))
+                teacher_prob = max(args.HCRL_Min_Teacher_Prob, args.HCRL_Teacher_Start_Prob * frac)
+            else:
+                teacher_prob = 0.0
+            if teacher_action is not None and np.random.rand() < teacher_prob:
+                action_HCRL_primary = int(teacher_action)
+            else:
+                action_HCRL_primary = brainHCRLPrimary.choose_action(hcrl_state, hcrl_primary_mask)
+
+            # Backup selector is learned and masked to same-type non-primary oracles.
+            hcrl_backup_mask = env.get_backup_action_mask(request_attrs, action_HCRL_primary)
+            if mode_HCRL == 0:
+                action_HCRL_backup = -1
+            elif getattr(args, "HCRL_Random_Backup", False):
+                valid_backup = np.where(hcrl_backup_mask)[0]
+                action_HCRL_backup = int(np.random.choice(valid_backup))
+            else:
+                # Early backup teacher guidance uses the observable safety score
+                # already available to the environment. This stabilizes low-level
+                # backup learning while still training a learned backup Q-policy.
+                backup_teacher_prob = 0.0
+                if episode < args.HCRL_Backup_Guidance_Episodes:
+                    frac_b = max(0.0, 1.0 - episode / max(args.HCRL_Backup_Guidance_Episodes, 1))
+                    backup_teacher_prob = max(args.HCRL_Backup_Min_Prob, args.HCRL_Backup_Start_Prob * frac_b)
+                if np.random.rand() < backup_teacher_prob:
+                    action_HCRL_backup = env.choose_backup_oracle(request_attrs, action_HCRL_primary, "HCRL-Oracle")
+                else:
+                    action_HCRL_backup = brainHCRLBackup.choose_action(hcrl_state, hcrl_backup_mask)
+
+            # Store previous transitions with current next states and masks.
+            if has_last_hcrl_mode:
+                brainHCRLMode.store_transition(last_hcrl_mode_state, last_hcrl_mode_action, last_hcrl_mode_reward, hcrl_mode_state, hcrl_mode_mask)
+            if has_last_hcrl_primary:
+                brainHCRLPrimary.store_transition(last_hcrl_primary_state, last_hcrl_primary_action, last_hcrl_primary_reward, hcrl_state, hcrl_primary_mask)
+            if has_last_hcrl_backup:
+                brainHCRLBackup.store_transition(last_hcrl_backup_state, last_hcrl_backup_action, last_hcrl_backup_reward, hcrl_state, hcrl_backup_mask)
+
+            hcrl_feedback = env.feedback_hcrl(
+                request_attrs, mode_HCRL, action_HCRL_primary, action_HCRL_backup, "HCRL-Oracle"
+            )
+            if (global_step > args.HCRL_start_learn) and (global_step % args.HCRL_Mode_learn_interval == 0):
+                brainHCRLMode.learn()
+            if (global_step > args.HCRL_start_learn) and (global_step % args.HCRL_learn_interval == 0):
+                brainHCRLPrimary.learn()
+            if (global_step > args.HCRL_start_learn) and (global_step % args.HCRL_Backup_learn_interval == 0):
+                brainHCRLBackup.learn()
+
+            last_hcrl_mode_state = hcrl_mode_state
+            last_hcrl_mode_action = mode_HCRL
+            last_hcrl_mode_reward = hcrl_feedback["mode_reward"]
+            has_last_hcrl_mode = True
+
+            last_hcrl_primary_state = hcrl_state
+            last_hcrl_primary_action = action_HCRL_primary
+            last_hcrl_primary_reward = hcrl_feedback["primary_reward"]
+            has_last_hcrl_primary = True
+
+            # Train backup only when the hierarchy actually considered a backup action.
+            if mode_HCRL in [1, 2] and action_HCRL_backup >= 0:
+                last_hcrl_backup_state = hcrl_state
+                last_hcrl_backup_action = action_HCRL_backup
+                last_hcrl_backup_reward = hcrl_feedback["backup_reward"]
+                has_last_hcrl_backup = True
+
         if request_c % 500 == 0:
             # Keep these calls for compatibility with the original code, even if the values are not printed here.
             env.get_accumulateRewards(args.Baseline_num, performance_c, request_c)
@@ -441,7 +620,7 @@ for episode in range(args.Epoch):
             ' finishT:', total_Ts[i],
             'Cost:', total_cost[i],
         )
-    for diag_name in ["PB-SafeDQN", "COBRA-Oracle"]:
+    for diag_name in ["PB-SafeDQN", "COBRA-Oracle", "HCRL-Oracle"]:
         if diag_name in args.Baselines:
             idx_diag = args.Baselines.index(diag_name)
             print(
@@ -475,6 +654,14 @@ for episode in range(args.Epoch):
         performance_backup_malicious_num += env.get_totalBackupMaliciousNum(args.Baseline_num, eval_start)
         performance_primary_trusted_num += env.get_totalPrimaryTrustedNum(args.Baseline_num, eval_start)
         performance_backup_trusted_num += env.get_totalBackupTrustedNum(args.Baseline_num, eval_start)
+        performance_cost_per_success += env.get_totalCostPerSuccess(args.Baseline_num, eval_start)
+        performance_hcrl_single_mode += env.get_totalHCRLSingleModeRate(args.Baseline_num, eval_start)
+        performance_hcrl_serial_mode += env.get_totalHCRLSerialModeRate(args.Baseline_num, eval_start)
+        performance_hcrl_parallel_mode += env.get_totalHCRLParallelModeRate(args.Baseline_num, eval_start)
+        performance_constraint_violation += env.get_totalConstraintViolationRate(args.Baseline_num, eval_start)
+        performance_cost_violation += env.get_totalCostViolationMean(args.Baseline_num, eval_start)
+        performance_latency_violation += env.get_totalLatencyViolationMean(args.Baseline_num, eval_start)
+        performance_risk_violation += env.get_totalRiskViolationMean(args.Baseline_num, eval_start)
 
     if episode == 0 and brainDQN is not None and len(brainDQN.reward_list) > 0:
         sns.set_style("darkgrid")
@@ -513,6 +700,14 @@ performance_primary_malicious_num = np.around(performance_primary_malicious_num 
 performance_backup_malicious_num = np.around(performance_backup_malicious_num / divisor, 0)
 performance_primary_trusted_num = np.around(performance_primary_trusted_num / divisor, 0)
 performance_backup_trusted_num = np.around(performance_backup_trusted_num / divisor, 0)
+performance_cost_per_success = np.around(performance_cost_per_success / divisor, 5)
+performance_hcrl_single_mode = np.around(performance_hcrl_single_mode / divisor, 3)
+performance_hcrl_serial_mode = np.around(performance_hcrl_serial_mode / divisor, 3)
+performance_hcrl_parallel_mode = np.around(performance_hcrl_parallel_mode / divisor, 3)
+performance_constraint_violation = np.around(performance_constraint_violation / divisor, 3)
+performance_cost_violation = np.around(performance_cost_violation / divisor, 4)
+performance_latency_violation = np.around(performance_latency_violation / divisor, 4)
+performance_risk_violation = np.around(performance_risk_violation / divisor, 4)
 
 print('method order:')
 print(args.Baselines)
@@ -556,9 +751,28 @@ print('primary trusted oracle count:')
 print(performance_primary_trusted_num)
 print('backup trusted oracle count:')
 print(performance_backup_trusted_num)
+print('cost_per_success:')
+print(performance_cost_per_success)
+print('hcrl_single_mode_rate:')
+print(performance_hcrl_single_mode)
+print('hcrl_serial_mode_rate:')
+print(performance_hcrl_serial_mode)
+print('hcrl_parallel_mode_rate:')
+print(performance_hcrl_parallel_mode)
+print('constraint_violation_rate:')
+print(performance_constraint_violation)
+print('cost_violation_mean:')
+print(performance_cost_violation)
+print('latency_violation_mean:')
+print(performance_latency_violation)
+print('risk_violation_mean:')
+print(performance_risk_violation)
 
 # Save machine-readable final results with the same timestamp prefix as the .txt log.
 final_results_df = pd.DataFrame({
+    "run_id": [RUN_ID] * len(args.Baselines),
+    "run_tag": [str(getattr(args, "Run_Tag", ""))] * len(args.Baselines),
+    "seed": [int(args.Seed)] * len(args.Baselines),
     "method": list(args.Baselines),
     "avg_responseT": performance_lamda,
     "total_rewards": performance_total_rewards,
@@ -580,6 +794,14 @@ final_results_df = pd.DataFrame({
     "backup_malicious": performance_backup_malicious_num,
     "primary_trusted": performance_primary_trusted_num,
     "backup_trusted": performance_backup_trusted_num,
+    "cost_per_success": performance_cost_per_success,
+    "hcrl_single_mode_rate": performance_hcrl_single_mode,
+    "hcrl_serial_mode_rate": performance_hcrl_serial_mode,
+    "hcrl_parallel_mode_rate": performance_hcrl_parallel_mode,
+    "constraint_violation_rate": performance_constraint_violation,
+    "cost_violation_mean": performance_cost_violation,
+    "latency_violation_mean": performance_latency_violation,
+    "risk_violation_mean": performance_risk_violation,
 })
 final_results_df.to_csv(RUN_CSV_PATH, index=False, encoding="utf-8-sig")
 
@@ -588,6 +810,7 @@ final_results_df.to_csv(RUN_CSV_PATH, index=False, encoding="utf-8-sig")
 weight_paths = {}
 weight_metadata = {
     "run_id": RUN_ID,
+    "run_tag": str(getattr(args, "Run_Tag", "")),
     "epoch": int(args.Epoch),
     "request_num": int(args.Request_Num),
     "scenario": args.Scenario,
@@ -624,6 +847,19 @@ if brainCOBRA is not None:
         os.path.join(RUN_DIR, f"{RUN_ID}_COBRA-Oracle_weights.npz"),
         metadata={**weight_metadata, "method": "COBRA-Oracle", "teacher_source": args.COBRA_Teacher_Source, "gate_mode": args.COBRA_Gate_Mode, "min_backup_score": args.COBRA_Min_Backup_Score},
     )
+if brainHCRLMode is not None:
+    weight_paths["HCRL-Oracle_Mode"] = brainHCRLMode.save_model(
+        os.path.join(RUN_DIR, f"{RUN_ID}_HCRL-Oracle_mode_weights.npz"),
+        metadata={**weight_metadata, "method": "HCRL-Oracle", "sub_policy": "mode", "teacher_source": args.HCRL_Teacher_Source},
+    )
+    weight_paths["HCRL-Oracle_Primary"] = brainHCRLPrimary.save_model(
+        os.path.join(RUN_DIR, f"{RUN_ID}_HCRL-Oracle_primary_weights.npz"),
+        metadata={**weight_metadata, "method": "HCRL-Oracle", "sub_policy": "primary", "teacher_source": args.HCRL_Teacher_Source},
+    )
+    weight_paths["HCRL-Oracle_Backup"] = brainHCRLBackup.save_model(
+        os.path.join(RUN_DIR, f"{RUN_ID}_HCRL-Oracle_backup_weights.npz"),
+        metadata={**weight_metadata, "method": "HCRL-Oracle", "sub_policy": "backup", "teacher_source": args.HCRL_Teacher_Source},
+    )
 
 print('saved model weights:')
 if len(weight_paths) == 0:
@@ -634,6 +870,7 @@ else:
 
 run_metadata = {
     "run_id": RUN_ID,
+    "run_tag": str(getattr(args, "Run_Tag", "")),
     "run_dir": str(RUN_DIR),
     "output_base": str(OUTPUT_BASE),
     "log_txt": RUN_TXT_PATH,
@@ -652,6 +889,10 @@ run_metadata = {
     "cobra_gate_mode": getattr(args, "COBRA_Gate_Mode", None),
     "cobra_teacher_source": getattr(args, "COBRA_Teacher_Source", None),
     "cobra_min_backup_score": float(getattr(args, "COBRA_Min_Backup_Score", 0.0)),
+    "hcrl_teacher_source": getattr(args, "HCRL_Teacher_Source", None),
+    "hcrl_cost_budget": float(getattr(args, "HCRL_Cost_Budget", 0.0)),
+    "hcrl_latency_budget": float(getattr(args, "HCRL_Latency_Budget", 0.0)),
+    "hcrl_risk_budget": float(getattr(args, "HCRL_Risk_Budget", 0.0)),
     "baselines": list(args.Baselines),
     "seed": int(args.Seed),
     "reward_scale": float(args.Reward_Scale),
