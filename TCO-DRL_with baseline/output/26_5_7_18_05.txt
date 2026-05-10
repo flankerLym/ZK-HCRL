@@ -1,0 +1,314 @@
+Generated Oracle_Num: 30
+Scenario: rl_harder Success_Mode: validation_aware State_Mode: enhanced Reward_Mode: risk_aware Action_Mask_Mode: type
+Baselines: ['Random', 'Round-Robin', 'Earliest', 'DQN', 'BLOR', 'SemiGreedy', 'PPO', 'RA-DDQN']
+Malicious oracles: [0, 5, 10, 15, 20, 25]
+Normal oracles: [2, 7, 12, 17, 22, 27]
+Trusted oracles: [1, 3, 4, 6, 8, 9, 11, 13, 14, 16, 18, 19, 21, 23, 24, 26, 28, 29]
+intervalT mean:  12.336   intervalT SD: 12.201
+last request arrivalT: 74016.317
+MI mean:  6001.853   MI SD: 503.794
+length mean:  6.002   length SD: 0.504
+----------------------------Episode 0 ----------------------------
+intervalT mean:  12.006   intervalT SD: 11.955
+last request arrivalT: 72033.534
+MI mean:  5995.866   MI SD: 504.012
+length mean:  5.996   length SD: 0.504
+total performance (after 2000 requests):
+[Random] reward: 228.424  avg_responseT: 5.294 success_rate: 0.245 success_time_rate: 0.979  finishT: 47913.016 Cost: 0.50842
+[Round-Robin] reward: 406.081  avg_responseT: 5.248 success_rate: 0.282 success_time_rate: 0.992  finishT: 47912.655 Cost: 0.508
+[Earliest] reward: 385.697  avg_responseT: 5.25 success_rate: 0.275 success_time_rate: 0.992  finishT: 47912.655 Cost: 0.50792
+[DQN] reward: 325.785  avg_responseT: 6.589 success_rate: 0.521 success_time_rate: 0.729  finishT: 47912.655 Cost: 0.95694
+[BLOR] reward: -131.986  avg_responseT: 5.352 success_rate: 0.184 success_time_rate: 0.969  finishT: 47913.016 Cost: 0.53352
+[SemiGreedy] reward: 267.776  avg_responseT: 4.992 success_rate: 0.238 success_time_rate: 0.996  finishT: 47912.092 Cost: 0.27472
+[PPO] reward: 1460.944  avg_responseT: 5.361 success_rate: 0.65 success_time_rate: 0.963  finishT: 47912.334 Cost: 0.50211
+[RA-DDQN] reward: 199.934  avg_responseT: 6.303 success_rate: 0.419 success_time_rate: 0.767  finishT: 47912.334 Cost: 0.69527
+----------------------------Episode 1 ----------------------------
+intervalT mean:  12.124   intervalT SD: 11.972
+last request arrivalT: 72741.769
+MI mean:  6003.996   MI SD: 505.02
+length mean:  6.004   length SD: 0.505
+total performance (after 2000 requests):
+[Random] reward: 243.599  avg_responseT: 5.305 success_rate: 0.252 success_time_rate: 0.977  finishT: 49079.152 Cost: 0.50704
+[Round-Robin] reward: 338.095  avg_responseT: 5.259 success_rate: 0.262 success_time_rate: 0.99  finishT: 49078.78 Cost: 0.508
+[Earliest] reward: 339.522  avg_responseT: 5.259 success_rate: 0.26 success_time_rate: 0.991  finishT: 49078.45 Cost: 0.50772
+[DQN] reward: 859.731  avg_responseT: 6.085 success_rate: 0.628 success_time_rate: 0.81  finishT: 49080.134 Cost: 0.97198
+[BLOR] reward: -158.114  avg_responseT: 5.356 success_rate: 0.18 success_time_rate: 0.968  finishT: 49079.152 Cost: 0.54087
+[SemiGreedy] reward: 294.194  avg_responseT: 4.992 success_rate: 0.244 success_time_rate: 0.995  finishT: 49078.78 Cost: 0.27226
+[PPO] reward: 1532.743  avg_responseT: 5.367 success_rate: 0.67 success_time_rate: 0.962  finishT: 49078.45 Cost: 0.5098
+[RA-DDQN] reward: 687.973  avg_responseT: 6.01 success_rate: 0.533 success_time_rate: 0.838  finishT: 49080.885 Cost: 0.81855
+----------------------------Episode 2 ----------------------------
+intervalT mean:  11.856   intervalT SD: 11.839
+last request arrivalT: 71137.015
+MI mean:  6003.493   MI SD: 504.261
+length mean:  6.003   length SD: 0.504
+total performance (after 2000 requests):
+[Random] reward: 275.889  avg_responseT: 5.293 success_rate: 0.254 success_time_rate: 0.983  finishT: 48347.437 Cost: 0.51593
+[Round-Robin] reward: 341.627  avg_responseT: 5.251 success_rate: 0.262 success_time_rate: 0.991  finishT: 48347.781 Cost: 0.508
+[Earliest] reward: 371.422  avg_responseT: 5.249 success_rate: 0.268 success_time_rate: 0.992  finishT: 48347.437 Cost: 0.50787
+[DQN] reward: 985.946  avg_responseT: 5.932 success_rate: 0.652 success_time_rate: 0.834  finishT: 48347.781 Cost: 0.98452
+[BLOR] reward: -148.575  avg_responseT: 5.364 success_rate: 0.184 success_time_rate: 0.967  finishT: 48347.781 Cost: 0.53326
+[SemiGreedy] reward: 265.655  avg_responseT: 4.955 success_rate: 0.234 success_time_rate: 0.998  finishT: 48347.176 Cost: 0.25188
+[PPO] reward: 1508.509  avg_responseT: 5.359 success_rate: 0.666 success_time_rate: 0.962  finishT: 48347.437 Cost: 0.51064
+[RA-DDQN] reward: 785.817  avg_responseT: 6.075 success_rate: 0.6 success_time_rate: 0.812  finishT: 48347.781 Cost: 0.92754
+----------------------------Episode 3 ----------------------------
+intervalT mean:  12.184   intervalT SD: 12.393
+last request arrivalT: 73105.84
+MI mean:  5994.543   MI SD: 503.777
+length mean:  5.995   length SD: 0.504
+total performance (after 2000 requests):
+[Random] reward: 187.347  avg_responseT: 5.282 success_rate: 0.233 success_time_rate: 0.978  finishT: 49058.297 Cost: 0.50237
+[Round-Robin] reward: 313.601  avg_responseT: 5.249 success_rate: 0.252 success_time_rate: 0.992  finishT: 49057.943 Cost: 0.508
+[Earliest] reward: 331.634  avg_responseT: 5.25 success_rate: 0.258 success_time_rate: 0.989  finishT: 49057.39 Cost: 0.50778
+[DQN] reward: 1244.425  avg_responseT: 5.589 success_rate: 0.666 success_time_rate: 0.909  finishT: 49062.128 Cost: 0.88153
+[BLOR] reward: -148.921  avg_responseT: 5.356 success_rate: 0.182 success_time_rate: 0.967  finishT: 49057.943 Cost: 0.54376
+[SemiGreedy] reward: 275.573  avg_responseT: 4.934 success_rate: 0.234 success_time_rate: 0.998  finishT: 49058.297 Cost: 0.24259
+[PPO] reward: 1548.616  avg_responseT: 5.364 success_rate: 0.678 success_time_rate: 0.962  finishT: 49058.297 Cost: 0.51818
+[RA-DDQN] reward: 892.09  avg_responseT: 5.874 success_rate: 0.595 success_time_rate: 0.853  finishT: 49057.39 Cost: 0.87429
+----------------------------Episode 4 ----------------------------
+intervalT mean:  11.769   intervalT SD: 11.618
+last request arrivalT: 70615.762
+MI mean:  6005.581   MI SD: 505.112
+length mean:  6.006   length SD: 0.505
+total performance (after 2000 requests):
+[Random] reward: 266.213  avg_responseT: 5.281 success_rate: 0.255 success_time_rate: 0.983  finishT: 47383.632 Cost: 0.51219
+[Round-Robin] reward: 382.663  avg_responseT: 5.256 success_rate: 0.275 success_time_rate: 0.992  finishT: 47383.324 Cost: 0.508
+[Earliest] reward: 358.173  avg_responseT: 5.255 success_rate: 0.266 success_time_rate: 0.993  finishT: 47383.05 Cost: 0.50769
+[DQN] reward: 1149.226  avg_responseT: 5.744 success_rate: 0.649 success_time_rate: 0.888  finishT: 47383.05 Cost: 0.87636
+[BLOR] reward: -134.748  avg_responseT: 5.36 success_rate: 0.187 success_time_rate: 0.967  finishT: 47383.324 Cost: 0.5329
+[SemiGreedy] reward: 283.042  avg_responseT: 4.979 success_rate: 0.242 success_time_rate: 0.996  finishT: 47382.843 Cost: 0.26529
+[PPO] reward: 1537.94  avg_responseT: 5.353 success_rate: 0.671 success_time_rate: 0.965  finishT: 47382.843 Cost: 0.5136
+[RA-DDQN] reward: 1071.073  avg_responseT: 5.812 success_rate: 0.648 success_time_rate: 0.864  finishT: 47383.324 Cost: 0.91902
+----------------------------Episode 5 ----------------------------
+intervalT mean:  12.027   intervalT SD: 12.049
+last request arrivalT: 72161.047
+MI mean:  5989.052   MI SD: 493.154
+length mean:  5.989   length SD: 0.493
+total performance (after 2000 requests):
+[Random] reward: 273.307  avg_responseT: 5.276 success_rate: 0.252 success_time_rate: 0.984  finishT: 47863.996 Cost: 0.49689
+[Round-Robin] reward: 343.507  avg_responseT: 5.246 success_rate: 0.258 success_time_rate: 0.995  finishT: 47864.147 Cost: 0.508
+[Earliest] reward: 388.752  avg_responseT: 5.245 success_rate: 0.275 success_time_rate: 0.992  finishT: 47864.147 Cost: 0.50787
+[DQN] reward: 1185.024  avg_responseT: 5.735 success_rate: 0.675 success_time_rate: 0.881  finishT: 47863.996 Cost: 0.92893
+[BLOR] reward: -126.897  avg_responseT: 5.355 success_rate: 0.186 success_time_rate: 0.968  finishT: 47864.147 Cost: 0.52428
+[SemiGreedy] reward: 306.948  avg_responseT: 4.974 success_rate: 0.246 success_time_rate: 0.998  finishT: 47863.53 Cost: 0.26756
+[PPO] reward: 1510.169  avg_responseT: 5.367 success_rate: 0.667 success_time_rate: 0.963  finishT: 47864.147 Cost: 0.52053
+[RA-DDQN] reward: 1055.226  avg_responseT: 5.832 success_rate: 0.638 success_time_rate: 0.874  finishT: 47870.454 Cost: 0.90468
+----------------------------Episode 6 ----------------------------
+intervalT mean:  11.903   intervalT SD: 12.043
+last request arrivalT: 71419.328
+MI mean:  5998.161   MI SD: 502.179
+length mean:  5.998   length SD: 0.502
+total performance (after 2000 requests):
+[Random] reward: 231.622  avg_responseT: 5.276 success_rate: 0.246 success_time_rate: 0.982  finishT: 47392.177 Cost: 0.5101
+[Round-Robin] reward: 366.163  avg_responseT: 5.241 success_rate: 0.268 success_time_rate: 0.992  finishT: 47392.543 Cost: 0.508
+[Earliest] reward: 349.385  avg_responseT: 5.241 success_rate: 0.264 success_time_rate: 0.992  finishT: 47391.9 Cost: 0.50787
+[DQN] reward: 1305.651  avg_responseT: 5.69 success_rate: 0.705 success_time_rate: 0.899  finishT: 47392.543 Cost: 0.96825
+[BLOR] reward: -160.403  avg_responseT: 5.352 success_rate: 0.181 success_time_rate: 0.965  finishT: 47392.543 Cost: 0.52911
+[SemiGreedy] reward: 282.684  avg_responseT: 4.934 success_rate: 0.239 success_time_rate: 0.997  finishT: 47391.9 Cost: 0.25052
+[PPO] reward: 1553.34  avg_responseT: 5.351 success_rate: 0.679 success_time_rate: 0.963  finishT: 47392.543 Cost: 0.51989
+[RA-DDQN] reward: 1299.942  avg_responseT: 5.615 success_rate: 0.68 success_time_rate: 0.915  finishT: 47392.543 Cost: 0.88699
+----------------------------Episode 7 ----------------------------
+intervalT mean:  12.017   intervalT SD: 11.841
+last request arrivalT: 72100.011
+MI mean:  5988.54   MI SD: 514.222
+length mean:  5.989   length SD: 0.514
+total performance (after 2000 requests):
+[Random] reward: 318.559  avg_responseT: 5.288 success_rate: 0.274 success_time_rate: 0.981  finishT: 48046.665 Cost: 0.51757
+[Round-Robin] reward: 394.149  avg_responseT: 5.248 success_rate: 0.274 success_time_rate: 0.993  finishT: 48047.164 Cost: 0.508
+[Earliest] reward: 357.628  avg_responseT: 5.249 success_rate: 0.267 success_time_rate: 0.993  finishT: 48047.164 Cost: 0.50796
+[DQN] reward: 1350.737  avg_responseT: 5.586 success_rate: 0.692 success_time_rate: 0.926  finishT: 48047.164 Cost: 0.90231
+[BLOR] reward: -116.882  avg_responseT: 5.355 success_rate: 0.19 success_time_rate: 0.968  finishT: 48046.88 Cost: 0.5418
+[SemiGreedy] reward: 229.327  avg_responseT: 4.975 success_rate: 0.224 success_time_rate: 0.997  finishT: 48046.665 Cost: 0.2653
+[PPO] reward: 1554.024  avg_responseT: 5.357 success_rate: 0.676 success_time_rate: 0.967  finishT: 48047.164 Cost: 0.5247
+[RA-DDQN] reward: 1268.932  avg_responseT: 5.639 success_rate: 0.678 success_time_rate: 0.912  finishT: 48047.164 Cost: 0.91859
+----------------------------Episode 8 ----------------------------
+intervalT mean:  12.077   intervalT SD: 12.158
+last request arrivalT: 72459.944
+MI mean:  6007.346   MI SD: 505.687
+length mean:  6.007   length SD: 0.506
+total performance (after 2000 requests):
+[Random] reward: 236.365  avg_responseT: 5.298 success_rate: 0.248 success_time_rate: 0.98  finishT: 47940.58 Cost: 0.50594
+[Round-Robin] reward: 361.395  avg_responseT: 5.265 success_rate: 0.269 success_time_rate: 0.991  finishT: 47940.58 Cost: 0.508
+[Earliest] reward: 378.655  avg_responseT: 5.265 success_rate: 0.273 success_time_rate: 0.991  finishT: 47940.58 Cost: 0.50764
+[DQN] reward: 1253.57  avg_responseT: 5.749 success_rate: 0.692 success_time_rate: 0.888  finishT: 47940.58 Cost: 0.9336
+[BLOR] reward: -207.005  avg_responseT: 5.373 success_rate: 0.168 success_time_rate: 0.964  finishT: 47940.58 Cost: 0.52717
+[SemiGreedy] reward: 359.178  avg_responseT: 5.0 success_rate: 0.264 success_time_rate: 0.996  finishT: 47939.993 Cost: 0.27965
+[PPO] reward: 1610.143  avg_responseT: 5.378 success_rate: 0.696 success_time_rate: 0.964  finishT: 47940.956 Cost: 0.52034
+[RA-DDQN] reward: 1233.394  avg_responseT: 5.748 success_rate: 0.693 success_time_rate: 0.878  finishT: 47940.58 Cost: 0.94065
+----------------------------Episode 9 ----------------------------
+intervalT mean:  11.825   intervalT SD: 11.765
+last request arrivalT: 70951.289
+MI mean:  6002.683   MI SD: 507.955
+length mean:  6.003   length SD: 0.508
+total performance (after 2000 requests):
+[Random] reward: 242.553  avg_responseT: 5.282 success_rate: 0.248 success_time_rate: 0.981  finishT: 47512.162 Cost: 0.50124
+[Round-Robin] reward: 351.517  avg_responseT: 5.252 success_rate: 0.264 success_time_rate: 0.993  finishT: 47511.804 Cost: 0.508
+[Earliest] reward: 352.983  avg_responseT: 5.253 success_rate: 0.263 success_time_rate: 0.992  finishT: 47512.162 Cost: 0.50782
+[DQN] reward: 1402.331  avg_responseT: 5.558 success_rate: 0.706 success_time_rate: 0.931  finishT: 47511.804 Cost: 0.9147
+[BLOR] reward: -187.193  avg_responseT: 5.365 success_rate: 0.169 success_time_rate: 0.967  finishT: 47511.804 Cost: 0.53488
+[SemiGreedy] reward: 321.149  avg_responseT: 4.958 success_rate: 0.25 success_time_rate: 0.998  finishT: 47511.245 Cost: 0.25663
+[PPO] reward: 1605.852  avg_responseT: 5.381 success_rate: 0.697 success_time_rate: 0.96  finishT: 47511.245 Cost: 0.52629
+[RA-DDQN] reward: 1363.499  avg_responseT: 5.598 success_rate: 0.7 success_time_rate: 0.918  finishT: 47511.804 Cost: 0.90791
+----------------------------Episode 10 ----------------------------
+intervalT mean:  11.888   intervalT SD: 11.838
+last request arrivalT: 71325.725
+MI mean:  6002.973   MI SD: 501.526
+length mean:  6.003   length SD: 0.502
+total performance (after 2000 requests):
+[Random] reward: 236.11  avg_responseT: 5.297 success_rate: 0.246 success_time_rate: 0.98  finishT: 47502.298 Cost: 0.50655
+[Round-Robin] reward: 354.819  avg_responseT: 5.255 success_rate: 0.264 success_time_rate: 0.99  finishT: 47502.298 Cost: 0.508
+[Earliest] reward: 357.532  avg_responseT: 5.254 success_rate: 0.266 success_time_rate: 0.993  finishT: 47502.298 Cost: 0.50796
+[DQN] reward: 1504.783  avg_responseT: 5.566 success_rate: 0.736 success_time_rate: 0.935  finishT: 47503.036 Cost: 0.92914
+[BLOR] reward: -179.454  avg_responseT: 5.373 success_rate: 0.175 success_time_rate: 0.964  finishT: 47502.298 Cost: 0.54328
+[SemiGreedy] reward: 321.776  avg_responseT: 5.0 success_rate: 0.254 success_time_rate: 0.996  finishT: 47501.732 Cost: 0.27802
+[PPO] reward: 1598.036  avg_responseT: 5.37 success_rate: 0.692 success_time_rate: 0.963  finishT: 47502.661 Cost: 0.52785
+[RA-DDQN] reward: 1462.228  avg_responseT: 5.553 success_rate: 0.718 success_time_rate: 0.936  finishT: 47502.661 Cost: 0.89128
+----------------------------Episode 11 ----------------------------
+intervalT mean:  11.985   intervalT SD: 12.136
+last request arrivalT: 71908.893
+MI mean:  5998.518   MI SD: 499.134
+length mean:  5.999   length SD: 0.499
+total performance (after 2000 requests):
+[Random] reward: 253.636  avg_responseT: 5.279 success_rate: 0.246 success_time_rate: 0.985  finishT: 48326.35 Cost: 0.50266
+[Round-Robin] reward: 401.001  avg_responseT: 5.251 success_rate: 0.278 success_time_rate: 0.994  finishT: 48325.968 Cost: 0.508
+[Earliest] reward: 363.302  avg_responseT: 5.25 success_rate: 0.268 success_time_rate: 0.994  finishT: 48325.968 Cost: 0.50756
+[DQN] reward: 1436.111  avg_responseT: 5.469 success_rate: 0.695 success_time_rate: 0.952  finishT: 48325.968 Cost: 0.87236
+[BLOR] reward: -185.488  avg_responseT: 5.367 success_rate: 0.172 success_time_rate: 0.966  finishT: 48325.968 Cost: 0.53164
+[SemiGreedy] reward: 350.659  avg_responseT: 5.039 success_rate: 0.268 success_time_rate: 0.994  finishT: 48325.629 Cost: 0.30417
+[PPO] reward: 1580.048  avg_responseT: 5.375 success_rate: 0.688 success_time_rate: 0.964  finishT: 48325.968 Cost: 0.53468
+[RA-DDQN] reward: 1538.5  avg_responseT: 5.534 success_rate: 0.745 success_time_rate: 0.944  finishT: 48325.968 Cost: 0.96
+----------------------------Episode 12 ----------------------------
+intervalT mean:  11.993   intervalT SD: 12.294
+last request arrivalT: 71960.539
+MI mean:  5991.03   MI SD: 504.547
+length mean:  5.991   length SD: 0.505
+total performance (after 2000 requests):
+[Random] reward: 257.858  avg_responseT: 5.29 success_rate: 0.253 success_time_rate: 0.978  finishT: 48145.978 Cost: 0.51641
+[Round-Robin] reward: 400.974  avg_responseT: 5.252 success_rate: 0.277 success_time_rate: 0.992  finishT: 48144.174 Cost: 0.508
+[Earliest] reward: 378.228  avg_responseT: 5.251 success_rate: 0.272 success_time_rate: 0.994  finishT: 48144.174 Cost: 0.50796
+[DQN] reward: 1563.876  avg_responseT: 5.528 success_rate: 0.748 success_time_rate: 0.947  finishT: 48144.556 Cost: 0.93814
+[BLOR] reward: -148.402  avg_responseT: 5.357 success_rate: 0.182 success_time_rate: 0.966  finishT: 48144.854 Cost: 0.52908
+[SemiGreedy] reward: 272.944  avg_responseT: 4.988 success_rate: 0.24 success_time_rate: 0.995  finishT: 48143.836 Cost: 0.27137
+[PPO] reward: 1587.393  avg_responseT: 5.372 success_rate: 0.692 success_time_rate: 0.965  finishT: 48144.174 Cost: 0.54282
+[RA-DDQN] reward: 1356.793  avg_responseT: 5.584 success_rate: 0.703 success_time_rate: 0.918  finishT: 48143.628 Cost: 0.93196
+----------------------------Episode 13 ----------------------------
+intervalT mean:  11.979   intervalT SD: 12.154
+last request arrivalT: 71873.512
+MI mean:  6001.345   MI SD: 504.357
+length mean:  6.001   length SD: 0.504
+total performance (after 2000 requests):
+[Random] reward: 224.378  avg_responseT: 5.293 success_rate: 0.244 success_time_rate: 0.983  finishT: 47562.361 Cost: 0.50434
+[Round-Robin] reward: 399.591  avg_responseT: 5.252 success_rate: 0.278 success_time_rate: 0.995  finishT: 47563.012 Cost: 0.508
+[Earliest] reward: 369.054  avg_responseT: 5.253 success_rate: 0.268 success_time_rate: 0.993  finishT: 47562.361 Cost: 0.50787
+[DQN] reward: 1346.585  avg_responseT: 5.547 success_rate: 0.68 success_time_rate: 0.935  finishT: 47563.43 Cost: 0.87439
+[BLOR] reward: -172.247  avg_responseT: 5.372 success_rate: 0.174 success_time_rate: 0.964  finishT: 47563.012 Cost: 0.5319
+[SemiGreedy] reward: 270.631  avg_responseT: 4.941 success_rate: 0.233 success_time_rate: 0.999  finishT: 47562.361 Cost: 0.24256
+[PPO] reward: 1578.002  avg_responseT: 5.387 success_rate: 0.691 success_time_rate: 0.961  finishT: 47563.012 Cost: 0.54222
+[RA-DDQN] reward: 1455.732  avg_responseT: 5.542 success_rate: 0.707 success_time_rate: 0.942  finishT: 47563.012 Cost: 0.86926
+----------------------------Episode 14 ----------------------------
+intervalT mean:  12.03   intervalT SD: 12.313
+last request arrivalT: 72179.689
+MI mean:  6001.607   MI SD: 500.411
+length mean:  6.002   length SD: 0.5
+total performance (after 2000 requests):
+[Random] reward: 250.376  avg_responseT: 5.298 success_rate: 0.251 success_time_rate: 0.979  finishT: 47529.936 Cost: 0.50769
+[Round-Robin] reward: 351.748  avg_responseT: 5.251 success_rate: 0.261 success_time_rate: 0.994  finishT: 47530.285 Cost: 0.508
+[Earliest] reward: 351.308  avg_responseT: 5.251 success_rate: 0.265 success_time_rate: 0.992  finishT: 47530.678 Cost: 0.50788
+[DQN] reward: 1439.595  avg_responseT: 5.504 success_rate: 0.7 success_time_rate: 0.946  finishT: 47531.397 Cost: 0.87276
+[BLOR] reward: -177.584  avg_responseT: 5.356 success_rate: 0.17 success_time_rate: 0.969  finishT: 47530.285 Cost: 0.53235
+[SemiGreedy] reward: 298.094  avg_responseT: 4.951 success_rate: 0.244 success_time_rate: 0.998  finishT: 47529.672 Cost: 0.2499
+[PPO] reward: 1629.359  avg_responseT: 5.364 success_rate: 0.702 success_time_rate: 0.966  finishT: 47530.285 Cost: 0.53227
+[RA-DDQN] reward: 1597.248  avg_responseT: 5.494 success_rate: 0.752 success_time_rate: 0.955  finishT: 47530.285 Cost: 0.93258
+----------------------------Episode 15 ----------------------------
+intervalT mean:  12.007   intervalT SD: 11.853
+last request arrivalT: 72040.531
+MI mean:  6000.925   MI SD: 499.199
+length mean:  6.001   length SD: 0.499
+total performance (after 2000 requests):
+[Random] reward: 264.362  avg_responseT: 5.295 success_rate: 0.256 success_time_rate: 0.979  finishT: 47904.903 Cost: 0.5094
+[Round-Robin] reward: 409.114  avg_responseT: 5.256 success_rate: 0.278 success_time_rate: 0.994  finishT: 47904.5 Cost: 0.508
+[Earliest] reward: 378.421  avg_responseT: 5.255 success_rate: 0.271 success_time_rate: 0.993  finishT: 47904.142 Cost: 0.50787
+[DQN] reward: 1412.164  avg_responseT: 5.44 success_rate: 0.682 success_time_rate: 0.95  finishT: 47904.5 Cost: 0.83889
+[BLOR] reward: -169.801  avg_responseT: 5.372 success_rate: 0.178 success_time_rate: 0.964  finishT: 47904.142 Cost: 0.52996
+[SemiGreedy] reward: 305.946  avg_responseT: 4.955 success_rate: 0.245 success_time_rate: 0.998  finishT: 47903.871 Cost: 0.2582
+[PPO] reward: 1540.442  avg_responseT: 5.386 success_rate: 0.679 success_time_rate: 0.96  finishT: 47904.5 Cost: 0.54134
+[RA-DDQN] reward: 1440.132  avg_responseT: 5.542 success_rate: 0.705 success_time_rate: 0.939  finishT: 47903.871 Cost: 0.87756
+----------------------------Episode 16 ----------------------------
+intervalT mean:  11.827   intervalT SD: 11.775
+last request arrivalT: 70963.423
+MI mean:  5998.692   MI SD: 506.97
+length mean:  5.999   length SD: 0.507
+total performance (after 2000 requests):
+[Random] reward: 247.693  avg_responseT: 5.292 success_rate: 0.252 success_time_rate: 0.979  finishT: 47661.831 Cost: 0.5023
+[Round-Robin] reward: 335.03  avg_responseT: 5.25 success_rate: 0.258 success_time_rate: 0.991  finishT: 47661.532 Cost: 0.508
+[Earliest] reward: 344.768  avg_responseT: 5.25 success_rate: 0.266 success_time_rate: 0.991  finishT: 47661.532 Cost: 0.50757
+[DQN] reward: 1520.009  avg_responseT: 5.538 success_rate: 0.738 success_time_rate: 0.945  finishT: 47661.532 Cost: 0.95382
+[BLOR] reward: -159.01  avg_responseT: 5.363 success_rate: 0.178 success_time_rate: 0.966  finishT: 47661.532 Cost: 0.52588
+[SemiGreedy] reward: 283.93  avg_responseT: 4.979 success_rate: 0.24 success_time_rate: 0.997  finishT: 47661.064 Cost: 0.26683
+[PPO] reward: 1548.926  avg_responseT: 5.372 success_rate: 0.68 success_time_rate: 0.963  finishT: 47661.064 Cost: 0.54817
+[RA-DDQN] reward: 1648.301  avg_responseT: 5.436 success_rate: 0.762 success_time_rate: 0.962  finishT: 47661.532 Cost: 0.93708
+----------------------------Episode 17 ----------------------------
+intervalT mean:  11.872   intervalT SD: 11.972
+last request arrivalT: 71232.485
+MI mean:  6004.329   MI SD: 503.345
+length mean:  6.004   length SD: 0.503
+total performance (after 2000 requests):
+[Random] reward: 232.077  avg_responseT: 5.314 success_rate: 0.249 success_time_rate: 0.978  finishT: 46227.634 Cost: 0.51721
+[Round-Robin] reward: 338.389  avg_responseT: 5.256 success_rate: 0.26 success_time_rate: 0.994  finishT: 46227.634 Cost: 0.508
+[Earliest] reward: 388.479  avg_responseT: 5.256 success_rate: 0.272 success_time_rate: 0.994  finishT: 46228.003 Cost: 0.50772
+[DQN] reward: 1575.896  avg_responseT: 5.485 success_rate: 0.743 success_time_rate: 0.954  finishT: 46227.634 Cost: 0.90938
+[BLOR] reward: -166.456  avg_responseT: 5.378 success_rate: 0.178 success_time_rate: 0.966  finishT: 46228.003 Cost: 0.5304
+[SemiGreedy] reward: 318.671  avg_responseT: 4.97 success_rate: 0.25 success_time_rate: 0.998  finishT: 46227.058 Cost: 0.26068
+[PPO] reward: 1625.955  avg_responseT: 5.388 success_rate: 0.703 success_time_rate: 0.962  finishT: 46227.634 Cost: 0.54799
+[RA-DDQN] reward: 1614.419  avg_responseT: 5.502 success_rate: 0.763 success_time_rate: 0.953  finishT: 46227.634 Cost: 0.94473
+----------------------------Episode 18 ----------------------------
+intervalT mean:  11.904   intervalT SD: 11.972
+last request arrivalT: 71422.081
+MI mean:  5983.738   MI SD: 507.917
+length mean:  5.984   length SD: 0.508
+total performance (after 2000 requests):
+[Random] reward: 253.909  avg_responseT: 5.282 success_rate: 0.253 success_time_rate: 0.981  finishT: 47413.932 Cost: 0.50738
+[Round-Robin] reward: 363.993  avg_responseT: 5.236 success_rate: 0.266 success_time_rate: 0.994  finishT: 47414.275 Cost: 0.508
+[Earliest] reward: 354.734  avg_responseT: 5.236 success_rate: 0.264 success_time_rate: 0.993  finishT: 47413.673 Cost: 0.50787
+[DQN] reward: 1545.272  avg_responseT: 5.419 success_rate: 0.719 success_time_rate: 0.967  finishT: 47414.275 Cost: 0.87992
+[BLOR] reward: -142.217  avg_responseT: 5.359 success_rate: 0.185 success_time_rate: 0.965  finishT: 47413.673 Cost: 0.54044
+[SemiGreedy] reward: 294.455  avg_responseT: 4.946 success_rate: 0.242 success_time_rate: 0.998  finishT: 47413.673 Cost: 0.2549
+[PPO] reward: 1584.093  avg_responseT: 5.373 success_rate: 0.692 success_time_rate: 0.961  finishT: 47414.275 Cost: 0.54803
+[RA-DDQN] reward: 1610.724  avg_responseT: 5.455 success_rate: 0.754 success_time_rate: 0.958  finishT: 47414.275 Cost: 0.93408
+----------------------------Episode 19 ----------------------------
+intervalT mean:  12.019   intervalT SD: 11.903
+last request arrivalT: 72113.156
+MI mean:  6005.61   MI SD: 501.942
+length mean:  6.006   length SD: 0.502
+total performance (after 2000 requests):
+[Random] reward: 302.907  avg_responseT: 5.288 success_rate: 0.264 success_time_rate: 0.983  finishT: 47707.241 Cost: 0.51192
+[Round-Robin] reward: 365.444  avg_responseT: 5.262 success_rate: 0.27 success_time_rate: 0.993  finishT: 47707.241 Cost: 0.508
+[Earliest] reward: 347.489  avg_responseT: 5.262 success_rate: 0.262 success_time_rate: 0.991  finishT: 47707.241 Cost: 0.50792
+[DQN] reward: 1659.897  avg_responseT: 5.453 success_rate: 0.77 success_time_rate: 0.964  finishT: 47707.241 Cost: 0.96524
+[BLOR] reward: -135.036  avg_responseT: 5.377 success_rate: 0.188 success_time_rate: 0.964  finishT: 47711.41 Cost: 0.53377
+[SemiGreedy] reward: 330.037  avg_responseT: 4.995 success_rate: 0.257 success_time_rate: 0.996  finishT: 47706.629 Cost: 0.26945
+[PPO] reward: 1633.713  avg_responseT: 5.397 success_rate: 0.709 success_time_rate: 0.962  finishT: 47706.893 Cost: 0.56215
+[RA-DDQN] reward: 1694.08  avg_responseT: 5.482 success_rate: 0.771 success_time_rate: 0.966  finishT: 47707.241 Cost: 0.91347
+---------------------------- Final results ----------------------------
+method order:
+['Random', 'Round-Robin', 'Earliest', 'DQN', 'BLOR', 'SemiGreedy', 'PPO', 'RA-DDQN']
+avg_responseT:
+[5.293 5.253 5.253 5.611 5.363 4.955 5.372 5.668]
+total_rewards:
+[ 377.258  548.276  544.23  2044.274 -231.408  457.17  2360.044 1908.326]
+success_rate:
+[0.251 0.268 0.268 0.702 0.179 0.241 0.686 0.679]
+success_time_rate:
+[0.981 0.992 0.992 0.919 0.966 0.998 0.962 0.907]
+finishT:
+[71764.164 71764.081 71763.942 71764.49  71764.31  71763.606 71764.005
+ 71764.452]
+cost:
+[0.5085  0.508   0.50771 0.91459 0.53357 0.25203 0.52906 0.89326]
+match rate:
+[0.333 0.332 0.332 1.    0.332 1.    1.    1.   ]
+requests assigned to malicious oracle:
+[1195. 1200. 1201.  237. 1042.  364. 1109.  285.]
+requests assigned to normal oracle:
+[1196. 1200. 1200.  315. 1049. 1033. 1108.  368.]
+requests assigned to trusted oracle:
+[3609. 3600. 3599. 5448. 3909. 4603. 3782. 5348.]

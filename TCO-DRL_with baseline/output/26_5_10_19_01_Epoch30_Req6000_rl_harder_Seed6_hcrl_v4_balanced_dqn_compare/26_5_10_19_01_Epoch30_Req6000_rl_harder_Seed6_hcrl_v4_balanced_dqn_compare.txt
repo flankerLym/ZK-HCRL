@@ -1,0 +1,357 @@
+Current working directory: E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline
+Output base directory: E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline\output
+Run folder: E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline\output\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare
+Run log path: E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline\output\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare.txt
+[Method selection] mode: exact
+[Method selection] running methods: ['DQN', 'HCRL-Oracle']
+intervalT mean:  12.336   intervalT SD: 12.201
+last request arrivalT: 74016.317
+MI mean:  6001.853   MI SD: 503.794
+length mean:  6.002   length SD: 0.504
+----------------------------Episode 0 ----------------------------
+intervalT mean:  12.006   intervalT SD: 11.955
+last request arrivalT: 72033.534
+MI mean:  5995.867   MI SD: 504.012
+length mean:  5.996   length SD: 0.504
+total performance (after 2000 requests):
+[DQN] reward: 373.31 avg_responseT: 6.734 success_rate: 51.23% success_time_rate: 51.23% finishT: 72039.60 Cost: 0.796
+[HCRL-Oracle] reward: -516.96 avg_responseT: 6.646 success_rate: 71.65% success_time_rate: 71.65% finishT: 72038.51 Cost: 1.195
+[HCRL-Oracle diagnostics] primary_success_rate: 15.72% backup_used_rate: 82.12% backup_recovery_rate: 55.93% conditional_backup_recovery_rate: 68.10% backup_skipped_rate: 3.00% backup_score_mean: 0.669
+----------------------------Episode 1 ----------------------------
+intervalT mean:  12.034   intervalT SD: 12.067
+last request arrivalT: 72204.881
+MI mean:  5998.305   MI SD: 504.006
+length mean:  5.998   length SD: 0.504
+total performance (after 2000 requests):
+[DQN] reward: 412.13 avg_responseT: 6.639 success_rate: 51.10% success_time_rate: 51.10% finishT: 72211.03 Cost: 0.778
+[HCRL-Oracle] reward: 1413.31 avg_responseT: 6.630 success_rate: 74.10% success_time_rate: 74.10% finishT: 72210.74 Cost: 1.244
+[HCRL-Oracle diagnostics] primary_success_rate: 19.25% backup_used_rate: 82.10% backup_recovery_rate: 54.85% conditional_backup_recovery_rate: 66.81% backup_skipped_rate: 0.38% backup_score_mean: 0.659
+----------------------------Episode 2 ----------------------------
+intervalT mean:  11.739   intervalT SD: 11.573
+last request arrivalT: 70432.017
+MI mean:  5993.7   MI SD: 501.811
+length mean:  5.994   length SD: 0.502
+total performance (after 2000 requests):
+[DQN] reward: 715.81 avg_responseT: 6.518 success_rate: 61.15% success_time_rate: 61.15% finishT: 70437.45 Cost: 0.874
+[HCRL-Oracle] reward: 980.36 avg_responseT: 6.616 success_rate: 71.78% success_time_rate: 71.78% finishT: 70437.45 Cost: 1.158
+[HCRL-Oracle diagnostics] primary_success_rate: 23.35% backup_used_rate: 74.48% backup_recovery_rate: 48.43% conditional_backup_recovery_rate: 65.02% backup_skipped_rate: 3.15% backup_score_mean: 0.659
+----------------------------Episode 3 ----------------------------
+intervalT mean:  12.019   intervalT SD: 11.916
+last request arrivalT: 72113.679
+MI mean:  6003.608   MI SD: 496.251
+length mean:  6.004   length SD: 0.496
+[HCRL] warm-started primary selector from DQN at episode 3
+total performance (after 2000 requests):
+[DQN] reward: 955.92 avg_responseT: 6.258 success_rate: 65.95% success_time_rate: 65.95% finishT: 72119.25 Cost: 0.907
+[HCRL-Oracle] reward: 2242.80 avg_responseT: 6.374 success_rate: 77.03% success_time_rate: 77.03% finishT: 72118.99 Cost: 1.155
+[HCRL-Oracle diagnostics] primary_success_rate: 28.23% backup_used_rate: 70.05% backup_recovery_rate: 48.80% conditional_backup_recovery_rate: 69.66% backup_skipped_rate: 2.20% backup_score_mean: 0.656
+----------------------------Episode 4 ----------------------------
+intervalT mean:  11.77   intervalT SD: 11.654
+last request arrivalT: 70617.919
+MI mean:  6002.714   MI SD: 495.841
+length mean:  6.003   length SD: 0.496
+total performance (after 2000 requests):
+[DQN] reward: 916.85 avg_responseT: 6.205 success_rate: 62.50% success_time_rate: 62.50% finishT: 70625.04 Cost: 0.839
+[HCRL-Oracle] reward: 2112.82 avg_responseT: 6.433 success_rate: 76.68% success_time_rate: 76.68% finishT: 70625.04 Cost: 1.151
+[HCRL-Oracle diagnostics] primary_success_rate: 30.48% backup_used_rate: 69.05% backup_recovery_rate: 46.20% conditional_backup_recovery_rate: 66.91% backup_skipped_rate: 2.00% backup_score_mean: 0.644
+----------------------------Episode 5 ----------------------------
+intervalT mean:  11.81   intervalT SD: 11.594
+last request arrivalT: 70862.501
+MI mean:  5993.896   MI SD: 503.915
+length mean:  5.994   length SD: 0.504
+total performance (after 2000 requests):
+[DQN] reward: 1114.11 avg_responseT: 6.135 success_rate: 67.73% success_time_rate: 67.73% finishT: 70868.68 Cost: 0.873
+[HCRL-Oracle] reward: 2364.68 avg_responseT: 6.298 success_rate: 75.95% success_time_rate: 75.95% finishT: 70868.68 Cost: 1.104
+[HCRL-Oracle diagnostics] primary_success_rate: 32.05% backup_used_rate: 64.38% backup_recovery_rate: 43.90% conditional_backup_recovery_rate: 68.19% backup_skipped_rate: 4.80% backup_score_mean: 0.644
+----------------------------Episode 6 ----------------------------
+intervalT mean:  12.112   intervalT SD: 11.965
+last request arrivalT: 72671.746
+MI mean:  6009.239   MI SD: 502.828
+length mean:  6.009   length SD: 0.503
+total performance (after 2000 requests):
+[DQN] reward: 1191.12 avg_responseT: 6.145 success_rate: 70.28% success_time_rate: 70.28% finishT: 72677.86 Cost: 0.895
+[HCRL-Oracle] reward: 2323.75 avg_responseT: 6.314 success_rate: 78.95% success_time_rate: 78.95% finishT: 72677.41 Cost: 1.156
+[HCRL-Oracle diagnostics] primary_success_rate: 34.58% backup_used_rate: 67.70% backup_recovery_rate: 44.38% conditional_backup_recovery_rate: 65.55% backup_skipped_rate: 0.53% backup_score_mean: 0.638
+----------------------------Episode 7 ----------------------------
+intervalT mean:  12.031   intervalT SD: 11.99
+last request arrivalT: 72183.909
+MI mean:  6004.12   MI SD: 495.662
+length mean:  6.004   length SD: 0.496
+total performance (after 2000 requests):
+[DQN] reward: 1172.38 avg_responseT: 6.089 success_rate: 68.58% success_time_rate: 68.58% finishT: 72190.34 Cost: 0.867
+[HCRL-Oracle] reward: 2589.57 avg_responseT: 6.214 success_rate: 79.77% success_time_rate: 79.77% finishT: 72189.87 Cost: 1.107
+[HCRL-Oracle diagnostics] primary_success_rate: 37.35% backup_used_rate: 61.90% backup_recovery_rate: 42.43% conditional_backup_recovery_rate: 68.54% backup_skipped_rate: 1.60% backup_score_mean: 0.647
+----------------------------Episode 8 ----------------------------
+intervalT mean:  12.157   intervalT SD: 12.077
+last request arrivalT: 72942.458
+MI mean:  6003.926   MI SD: 503.512
+length mean:  6.004   length SD: 0.504
+total performance (after 2000 requests):
+[DQN] reward: 1263.85 avg_responseT: 6.045 success_rate: 70.33% success_time_rate: 70.33% finishT: 72950.74 Cost: 0.863
+[HCRL-Oracle] reward: 2821.02 avg_responseT: 6.138 success_rate: 82.58% success_time_rate: 82.58% finishT: 72947.69 Cost: 1.090
+[HCRL-Oracle diagnostics] primary_success_rate: 42.08% backup_used_rate: 57.48% backup_recovery_rate: 40.50% conditional_backup_recovery_rate: 70.47% backup_skipped_rate: 0.60% backup_score_mean: 0.660
+----------------------------Episode 9 ----------------------------
+intervalT mean:  11.837   intervalT SD: 11.772
+last request arrivalT: 71020.334
+MI mean:  6001.127   MI SD: 501.771
+length mean:  6.001   length SD: 0.502
+total performance (after 2000 requests):
+[DQN] reward: 1399.13 avg_responseT: 5.960 success_rate: 73.12% success_time_rate: 73.12% finishT: 71026.45 Cost: 0.855
+[HCRL-Oracle] reward: 2546.44 avg_responseT: 6.208 success_rate: 81.27% success_time_rate: 81.27% finishT: 71026.45 Cost: 1.102
+[HCRL-Oracle diagnostics] primary_success_rate: 41.25% backup_used_rate: 58.90% backup_recovery_rate: 40.02% conditional_backup_recovery_rate: 67.95% backup_skipped_rate: 0.62% backup_score_mean: 0.656
+----------------------------Episode 10 ----------------------------
+intervalT mean:  11.888   intervalT SD: 11.778
+last request arrivalT: 71325.8
+MI mean:  5996.853   MI SD: 488.404
+length mean:  5.997   length SD: 0.488
+total performance (after 2000 requests):
+[DQN] reward: 1374.58 avg_responseT: 6.012 success_rate: 73.38% success_time_rate: 73.38% finishT: 71331.40 Cost: 0.876
+[HCRL-Oracle] reward: 2749.58 avg_responseT: 6.082 success_rate: 82.58% success_time_rate: 82.58% finishT: 71331.40 Cost: 1.058
+[HCRL-Oracle diagnostics] primary_success_rate: 44.77% backup_used_rate: 54.60% backup_recovery_rate: 37.80% conditional_backup_recovery_rate: 69.23% backup_skipped_rate: 1.52% backup_score_mean: 0.650
+----------------------------Episode 11 ----------------------------
+intervalT mean:  12.112   intervalT SD: 12.005
+last request arrivalT: 72671.33
+MI mean:  6008.698   MI SD: 499.335
+length mean:  6.009   length SD: 0.499
+total performance (after 2000 requests):
+[DQN] reward: 1424.60 avg_responseT: 5.962 success_rate: 73.58% success_time_rate: 73.58% finishT: 72677.14 Cost: 0.870
+[HCRL-Oracle] reward: 2861.09 avg_responseT: 6.040 success_rate: 82.67% success_time_rate: 82.67% finishT: 72677.14 Cost: 1.026
+[HCRL-Oracle diagnostics] primary_success_rate: 48.00% backup_used_rate: 50.58% backup_recovery_rate: 34.67% conditional_backup_recovery_rate: 68.56% backup_skipped_rate: 2.95% backup_score_mean: 0.637
+----------------------------Episode 12 ----------------------------
+intervalT mean:  12.032   intervalT SD: 12.054
+last request arrivalT: 72191.766
+MI mean:  5991.734   MI SD: 502.485
+length mean:  5.992   length SD: 0.502
+total performance (after 2000 requests):
+[DQN] reward: 1447.54 avg_responseT: 5.943 success_rate: 74.78% success_time_rate: 74.78% finishT: 72198.12 Cost: 0.885
+[HCRL-Oracle] reward: 2154.20 avg_responseT: 6.036 success_rate: 81.88% success_time_rate: 81.88% finishT: 72197.65 Cost: 1.045
+[HCRL-Oracle diagnostics] primary_success_rate: 49.70% backup_used_rate: 49.35% backup_recovery_rate: 32.17% conditional_backup_recovery_rate: 65.20% backup_skipped_rate: 3.30% backup_score_mean: 0.622
+----------------------------Episode 13 ----------------------------
+intervalT mean:  12.041   intervalT SD: 12.252
+last request arrivalT: 72248.228
+MI mean:  6005.569   MI SD: 505.544
+length mean:  6.006   length SD: 0.506
+total performance (after 2000 requests):
+[DQN] reward: 1477.47 avg_responseT: 5.985 success_rate: 76.40% success_time_rate: 76.40% finishT: 72254.71 Cost: 0.905
+[HCRL-Oracle] reward: 2694.92 avg_responseT: 6.001 success_rate: 83.08% success_time_rate: 83.08% finishT: 72254.71 Cost: 1.021
+[HCRL-Oracle diagnostics] primary_success_rate: 52.52% backup_used_rate: 47.02% backup_recovery_rate: 30.55% conditional_backup_recovery_rate: 64.97% backup_skipped_rate: 3.52% backup_score_mean: 0.610
+----------------------------Episode 14 ----------------------------
+intervalT mean:  11.879   intervalT SD: 11.748
+last request arrivalT: 71276.421
+MI mean:  6005.731   MI SD: 501.905
+length mean:  6.006   length SD: 0.502
+total performance (after 2000 requests):
+[DQN] reward: 1414.83 avg_responseT: 6.024 success_rate: 74.48% success_time_rate: 74.48% finishT: 71281.31 Cost: 0.893
+[HCRL-Oracle] reward: 2570.58 avg_responseT: 5.956 success_rate: 82.90% success_time_rate: 82.90% finishT: 71282.39 Cost: 0.998
+[HCRL-Oracle diagnostics] primary_success_rate: 53.15% backup_used_rate: 44.45% backup_recovery_rate: 29.75% conditional_backup_recovery_rate: 66.93% backup_skipped_rate: 4.72% backup_score_mean: 0.616
+----------------------------Episode 15 ----------------------------
+intervalT mean:  12.07   intervalT SD: 11.947
+last request arrivalT: 72422.434
+MI mean:  6005.051   MI SD: 498.5
+length mean:  6.005   length SD: 0.498
+total performance (after 2000 requests):
+[DQN] reward: 1471.38 avg_responseT: 5.985 success_rate: 75.62% success_time_rate: 75.62% finishT: 72429.08 Cost: 0.903
+[HCRL-Oracle] reward: 2610.17 avg_responseT: 6.003 success_rate: 84.23% success_time_rate: 84.23% finishT: 72428.77 Cost: 1.036
+[HCRL-Oracle diagnostics] primary_success_rate: 54.33% backup_used_rate: 47.12% backup_recovery_rate: 29.90% conditional_backup_recovery_rate: 63.45% backup_skipped_rate: 1.50% backup_score_mean: 0.623
+----------------------------Episode 16 ----------------------------
+intervalT mean:  12.032   intervalT SD: 12.094
+last request arrivalT: 72191.192
+MI mean:  6000.247   MI SD: 508.048
+length mean:  6.0   length SD: 0.508
+total performance (after 2000 requests):
+[DQN] reward: 1468.66 avg_responseT: 5.930 success_rate: 74.83% success_time_rate: 74.83% finishT: 72196.98 Cost: 0.879
+[HCRL-Oracle] reward: 2245.06 avg_responseT: 5.951 success_rate: 83.33% success_time_rate: 83.33% finishT: 72196.98 Cost: 0.980
+[HCRL-Oracle diagnostics] primary_success_rate: 55.83% backup_used_rate: 43.23% backup_recovery_rate: 27.50% conditional_backup_recovery_rate: 63.62% backup_skipped_rate: 3.80% backup_score_mean: 0.609
+----------------------------Episode 17 ----------------------------
+intervalT mean:  11.776   intervalT SD: 11.521
+last request arrivalT: 70658.275
+MI mean:  6013.189   MI SD: 495.508
+length mean:  6.013   length SD: 0.496
+total performance (after 2000 requests):
+[DQN] reward: 1402.36 avg_responseT: 5.974 success_rate: 72.40% success_time_rate: 72.40% finishT: 70664.46 Cost: 0.844
+[HCRL-Oracle] reward: 3002.76 avg_responseT: 5.976 success_rate: 86.55% success_time_rate: 86.55% finishT: 70664.16 Cost: 1.018
+[HCRL-Oracle diagnostics] primary_success_rate: 57.30% backup_used_rate: 43.48% backup_recovery_rate: 29.25% conditional_backup_recovery_rate: 67.28% backup_skipped_rate: 0.90% backup_score_mean: 0.630
+----------------------------Episode 18 ----------------------------
+intervalT mean:  12.24   intervalT SD: 12.019
+last request arrivalT: 73442.803
+MI mean:  5996.011   MI SD: 500.973
+length mean:  5.996   length SD: 0.501
+total performance (after 2000 requests):
+[DQN] reward: 1555.71 avg_responseT: 5.939 success_rate: 76.78% success_time_rate: 76.78% finishT: 73448.99 Cost: 0.879
+[HCRL-Oracle] reward: 2959.33 avg_responseT: 5.966 success_rate: 87.48% success_time_rate: 87.48% finishT: 73448.69 Cost: 1.032
+[HCRL-Oracle diagnostics] primary_success_rate: 61.20% backup_used_rate: 41.62% backup_recovery_rate: 26.27% conditional_backup_recovery_rate: 63.12% backup_skipped_rate: 0.78% backup_score_mean: 0.639
+----------------------------Episode 19 ----------------------------
+intervalT mean:  11.743   intervalT SD: 11.935
+last request arrivalT: 70460.82
+MI mean:  5999.243   MI SD: 501.38
+length mean:  5.999   length SD: 0.501
+total performance (after 2000 requests):
+[DQN] reward: 1501.20 avg_responseT: 5.916 success_rate: 75.40% success_time_rate: 75.40% finishT: 70466.67 Cost: 0.872
+[HCRL-Oracle] reward: 2751.19 avg_responseT: 6.040 success_rate: 84.67% success_time_rate: 84.67% finishT: 70466.67 Cost: 1.059
+[HCRL-Oracle diagnostics] primary_success_rate: 59.40% backup_used_rate: 42.75% backup_recovery_rate: 25.27% conditional_backup_recovery_rate: 59.12% backup_skipped_rate: 1.65% backup_score_mean: 0.621
+----------------------------Episode 20 ----------------------------
+intervalT mean:  11.764   intervalT SD: 11.4
+last request arrivalT: 70585.897
+MI mean:  6005.55   MI SD: 494.173
+length mean:  6.006   length SD: 0.494
+total performance (after 2000 requests):
+[DQN] reward: 1469.70 avg_responseT: 5.958 success_rate: 74.65% success_time_rate: 74.65% finishT: 70591.27 Cost: 0.870
+[HCRL-Oracle] reward: 2684.09 avg_responseT: 6.048 success_rate: 85.17% success_time_rate: 85.17% finishT: 70591.27 Cost: 1.062
+[HCRL-Oracle diagnostics] primary_success_rate: 60.85% backup_used_rate: 41.20% backup_recovery_rate: 24.32% conditional_backup_recovery_rate: 59.04% backup_skipped_rate: 2.53% backup_score_mean: 0.596
+----------------------------Episode 21 ----------------------------
+intervalT mean:  11.826   intervalT SD: 11.728
+last request arrivalT: 70956.4
+MI mean:  6003.28   MI SD: 505.686
+length mean:  6.003   length SD: 0.506
+total performance (after 2000 requests):
+[DQN] reward: 1522.95 avg_responseT: 5.904 success_rate: 75.28% success_time_rate: 75.28% finishT: 70962.61 Cost: 0.851
+[HCRL-Oracle] reward: 2486.08 avg_responseT: 6.075 success_rate: 85.00% success_time_rate: 85.00% finishT: 70962.61 Cost: 1.071
+[HCRL-Oracle diagnostics] primary_success_rate: 61.75% backup_used_rate: 39.73% backup_recovery_rate: 23.25% conditional_backup_recovery_rate: 58.53% backup_skipped_rate: 3.05% backup_score_mean: 0.586
+----------------------------Episode 22 ----------------------------
+intervalT mean:  11.992   intervalT SD: 11.869
+last request arrivalT: 71954.202
+MI mean:  5996.761   MI SD: 501.593
+length mean:  5.997   length SD: 0.502
+total performance (after 2000 requests):
+[DQN] reward: 1503.73 avg_responseT: 5.888 success_rate: 74.75% success_time_rate: 74.75% finishT: 71959.37 Cost: 0.858
+[HCRL-Oracle] reward: 2349.01 avg_responseT: 6.135 success_rate: 83.55% success_time_rate: 83.55% finishT: 71958.99 Cost: 1.096
+[HCRL-Oracle diagnostics] primary_success_rate: 60.32% backup_used_rate: 39.62% backup_recovery_rate: 23.23% conditional_backup_recovery_rate: 58.61% backup_skipped_rate: 2.95% backup_score_mean: 0.589
+----------------------------Episode 23 ----------------------------
+intervalT mean:  11.895   intervalT SD: 11.764
+last request arrivalT: 71369.115
+MI mean:  5987.424   MI SD: 505.273
+length mean:  5.987   length SD: 0.505
+total performance (after 2000 requests):
+[DQN] reward: 1590.91 avg_responseT: 5.897 success_rate: 77.68% success_time_rate: 77.68% finishT: 71375.06 Cost: 0.882
+[HCRL-Oracle] reward: 2533.69 avg_responseT: 6.010 success_rate: 84.97% success_time_rate: 84.97% finishT: 71378.93 Cost: 1.082
+[HCRL-Oracle diagnostics] primary_success_rate: 62.50% backup_used_rate: 37.35% backup_recovery_rate: 22.48% conditional_backup_recovery_rate: 60.17% backup_skipped_rate: 3.98% backup_score_mean: 0.577
+----------------------------Episode 24 ----------------------------
+intervalT mean:  12.295   intervalT SD: 12.157
+last request arrivalT: 73771.136
+MI mean:  6000.365   MI SD: 496.217
+length mean:  6.0   length SD: 0.496
+total performance (after 2000 requests):
+[DQN] reward: 1610.02 avg_responseT: 5.910 success_rate: 77.90% success_time_rate: 77.90% finishT: 73776.49 Cost: 0.884
+[HCRL-Oracle] reward: 2364.04 avg_responseT: 6.123 success_rate: 85.72% success_time_rate: 85.72% finishT: 73776.49 Cost: 1.141
+[HCRL-Oracle diagnostics] primary_success_rate: 63.50% backup_used_rate: 40.60% backup_recovery_rate: 22.23% conditional_backup_recovery_rate: 54.74% backup_skipped_rate: 0.95% backup_score_mean: 0.586
+----------------------------Episode 25 ----------------------------
+intervalT mean:  11.874   intervalT SD: 11.952
+last request arrivalT: 71242.161
+MI mean:  6004.621   MI SD: 498.934
+length mean:  6.005   length SD: 0.499
+total performance (after 2000 requests):
+[DQN] reward: 1504.87 avg_responseT: 5.943 success_rate: 75.90% success_time_rate: 75.90% finishT: 71247.23 Cost: 0.892
+[HCRL-Oracle] reward: 2216.33 avg_responseT: 6.251 success_rate: 85.30% success_time_rate: 85.30% finishT: 71247.23 Cost: 1.175
+[HCRL-Oracle diagnostics] primary_success_rate: 64.95% backup_used_rate: 36.58% backup_recovery_rate: 20.35% conditional_backup_recovery_rate: 55.64% backup_skipped_rate: 0.22% backup_score_mean: 0.623
+----------------------------Episode 26 ----------------------------
+intervalT mean:  11.961   intervalT SD: 11.99
+last request arrivalT: 71766.515
+MI mean:  6003.354   MI SD: 499.819
+length mean:  6.003   length SD: 0.5
+total performance (after 2000 requests):
+[DQN] reward: 1593.43 avg_responseT: 5.918 success_rate: 77.72% success_time_rate: 77.72% finishT: 71772.89 Cost: 0.886
+[HCRL-Oracle] reward: 2117.47 avg_responseT: 6.244 success_rate: 83.90% success_time_rate: 83.90% finishT: 71772.58 Cost: 1.175
+[HCRL-Oracle diagnostics] primary_success_rate: 62.22% backup_used_rate: 37.92% backup_recovery_rate: 21.68% conditional_backup_recovery_rate: 57.15% backup_skipped_rate: 1.70% backup_score_mean: 0.592
+----------------------------Episode 27 ----------------------------
+intervalT mean:  12.022   intervalT SD: 11.773
+last request arrivalT: 72134.603
+MI mean:  5998.606   MI SD: 496.093
+length mean:  5.999   length SD: 0.496
+total performance (after 2000 requests):
+[DQN] reward: 1544.34 avg_responseT: 5.927 success_rate: 75.88% success_time_rate: 75.88% finishT: 72140.49 Cost: 0.869
+[HCRL-Oracle] reward: 2096.59 avg_responseT: 6.226 success_rate: 83.47% success_time_rate: 83.47% finishT: 72140.21 Cost: 1.134
+[HCRL-Oracle diagnostics] primary_success_rate: 61.32% backup_used_rate: 38.27% backup_recovery_rate: 22.15% conditional_backup_recovery_rate: 57.87% backup_skipped_rate: 3.85% backup_score_mean: 0.575
+----------------------------Episode 28 ----------------------------
+intervalT mean:  12.08   intervalT SD: 12.143
+last request arrivalT: 72479.11
+MI mean:  6008.409   MI SD: 500.282
+length mean:  6.008   length SD: 0.5
+total performance (after 2000 requests):
+[DQN] reward: 1611.46 avg_responseT: 5.901 success_rate: 77.78% success_time_rate: 77.78% finishT: 72485.62 Cost: 0.871
+[HCRL-Oracle] reward: 2025.37 avg_responseT: 6.206 success_rate: 83.25% success_time_rate: 83.25% finishT: 72485.31 Cost: 1.129
+[HCRL-Oracle diagnostics] primary_success_rate: 62.52% backup_used_rate: 37.57% backup_recovery_rate: 20.72% conditional_backup_recovery_rate: 55.16% backup_skipped_rate: 3.60% backup_score_mean: 0.574
+----------------------------Episode 29 ----------------------------
+intervalT mean:  11.965   intervalT SD: 11.954
+last request arrivalT: 71789.111
+MI mean:  5992.264   MI SD: 497.439
+length mean:  5.992   length SD: 0.497
+total performance (after 2000 requests):
+[DQN] reward: 1601.91 avg_responseT: 5.923 success_rate: 78.15% success_time_rate: 78.15% finishT: 71794.93 Cost: 0.892
+[HCRL-Oracle] reward: 2177.62 avg_responseT: 6.163 success_rate: 83.67% success_time_rate: 83.67% finishT: 71794.93 Cost: 1.118
+[HCRL-Oracle diagnostics] primary_success_rate: 63.62% backup_used_rate: 35.33% backup_recovery_rate: 20.05% conditional_backup_recovery_rate: 56.76% backup_skipped_rate: 3.92% backup_score_mean: 0.569
+---------------------------- Final results ----------------------------
+method order:
+['DQN', 'HCRL-Oracle']
+avg_responseT:
+[6.029 6.164]
+total_rewards:
+[1352.861 2380.824]
+success_rate:
+[0.726 0.821]
+success_time_rate:
+[0.726 0.821]
+finishT:
+[71798.678 71798.601]
+cost:
+[0.87276 1.09387]
+match rate:
+[1. 1.]
+requests assigned to malicious oracle:
+[ 86. 107.]
+requests assigned to normal oracle:
+[ 188. 1107.]
+requests assigned to trusted oracle:
+[3725. 4792.]
+primary_success_rate:
+[0.726 0.499]
+backup_used_rate:
+[0.    0.502]
+backup_recovery_rate:
+[0.    0.322]
+conditional_backup_recovery_rate:
+[0.    0.633]
+backup_skipped_rate:
+[0.    0.023]
+backup_score_mean:
+[0.   0.62]
+primary malicious oracle count:
+[86. 95.]
+backup malicious oracle count:
+[ 0. 12.]
+primary trusted oracle count:
+[3725. 2813.]
+backup trusted oracle count:
+[   0. 1979.]
+cost_per_success:
+[1.21055 1.33687]
+hcrl_single_mode_rate:
+[0.    0.449]
+hcrl_serial_mode_rate:
+[0.    0.049]
+hcrl_parallel_mode_rate:
+[0.    0.502]
+constraint_violation_rate:
+[0.    0.676]
+cost_violation_mean:
+[0.     0.1802]
+latency_violation_mean:
+[0.     0.4098]
+risk_violation_mean:
+[0.     0.0251]
+hcrl_lambda_cost_mean:
+[0. 0.]
+hcrl_lambda_latency_mean:
+[0. 0.]
+hcrl_lambda_risk_mean:
+[0. 0.]
+saved model weights:
+DQN: E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline\output\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare_DQN_weights.npz
+HCRL-Oracle_Mode: E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline\output\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare_HCRL-Oracle_mode_weights.npz
+HCRL-Oracle_Primary: E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline\output\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare_HCRL-Oracle_primary_weights.npz
+HCRL-Oracle_Backup: E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline\output\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare_HCRL-Oracle_backup_weights.npz
+saved run log txt:
+E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline\output\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare.txt
+saved final results csv:
+E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline\output\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare_final_results.csv
+saved final results json:
+E:\keyan\code\TCO\TCO-DRL\TCO-DRL_with baseline\output\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare\26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare_final_results.json

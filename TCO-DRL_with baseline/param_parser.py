@@ -228,7 +228,7 @@ def parameter_parser():
     parser.add_argument("--HCRL_lr", type=float, default=0.0013)
     parser.add_argument("--HCRL_Mode_lr", type=float, default=0.0010)
     parser.add_argument("--HCRL_Use_Actor_Critic", action="store_true", default=True)
-    parser.add_argument("--HCRL_AC_Entropy", type=float, default=0.015)
+    parser.add_argument("--HCRL_AC_Entropy", type=float, default=0.05)
     parser.add_argument("--HCRL_AC_Value_Coef", type=float, default=0.5)
     parser.add_argument("--HCRL_start_learn", type=int, default=200)
     parser.add_argument("--HCRL_learn_interval", type=int, default=1)
@@ -236,33 +236,68 @@ def parameter_parser():
     parser.add_argument("--HCRL_Mode_learn_interval", type=int, default=1)
     parser.add_argument("--HCRL_Teacher_Source", choices=["DQN", "RA-DDQN", "COBRA-Oracle", "none"], default="DQN")
     parser.add_argument("--HCRL_WarmStart_Episode", type=int, default=3)
-    parser.add_argument("--HCRL_Teacher_Guidance_Episodes", type=int, default=8)
-    parser.add_argument("--HCRL_Teacher_Start_Prob", type=float, default=0.70)
+    parser.add_argument("--HCRL_Teacher_Guidance_Episodes", type=int, default=20)
+    parser.add_argument("--HCRL_Teacher_Start_Prob", type=float, default=0.85)
     parser.add_argument("--HCRL_Min_Teacher_Prob", type=float, default=0.03)
-    parser.add_argument("--HCRL_Mode_Start_Prob", type=float, default=0.10)
-    parser.add_argument("--HCRL_Mode_Min_Prob", type=float, default=0.03)
+    parser.add_argument("--HCRL_Mode_Start_Prob", type=float, default=0.0)
+    parser.add_argument("--HCRL_Mode_Min_Prob", type=float, default=0.0)
     parser.add_argument("--HCRL_Primary_Success_Bonus", type=float, default=0.30)
-    parser.add_argument("--HCRL_Backup_Recovery_Bonus", type=float, default=0.40)
-    parser.add_argument("--HCRL_Backup_Used_Penalty", type=float, default=0.20)
-    parser.add_argument("--HCRL_Unnecessary_Backup_Penalty", type=float, default=0.32)
-    parser.add_argument("--HCRL_Skip_Recovery_Penalty", type=float, default=0.08)
-    parser.add_argument("--HCRL_Primary_Malicious_Penalty", type=float, default=0.35)
-    parser.add_argument("--HCRL_Backup_Malicious_Penalty", type=float, default=0.50)
-    parser.add_argument("--HCRL_Backup_Guidance_Episodes", type=int, default=10)
-    parser.add_argument("--HCRL_Backup_Start_Prob", type=float, default=0.85)
+    parser.add_argument("--HCRL_Backup_Recovery_Bonus", type=float, default=0.72)
+    parser.add_argument("--HCRL_Backup_Used_Penalty", type=float, default=0.08)
+    parser.add_argument("--HCRL_Unnecessary_Backup_Penalty", type=float, default=0.18)
+    parser.add_argument("--HCRL_Skip_Recovery_Penalty", type=float, default=0.20)
+    parser.add_argument("--HCRL_Primary_Malicious_Penalty", type=float, default=0.80)
+    parser.add_argument("--HCRL_Backup_Malicious_Penalty", type=float, default=1.20)
+    parser.add_argument("--HCRL_Backup_Guidance_Episodes", type=int, default=20)
+    parser.add_argument("--HCRL_Backup_Start_Prob", type=float, default=0.95)
     parser.add_argument("--HCRL_Backup_Min_Prob", type=float, default=0.05)
-    parser.add_argument("--HCRL_Cost_Budget", type=float, default=1.02)
-    parser.add_argument("--HCRL_Latency_Budget", type=float, default=5.95)
+    parser.add_argument("--HCRL_Cost_Budget", type=float, default=1.00)
+    parser.add_argument("--HCRL_Latency_Budget", type=float, default=6.20)
     parser.add_argument("--HCRL_Risk_Budget", type=float, default=0.06)
-    parser.add_argument("--HCRL_Lambda_Cost", type=float, default=0.55)
+    parser.add_argument("--HCRL_Lambda_Cost", type=float, default=0.70)
     parser.add_argument("--HCRL_Lambda_Latency", type=float, default=0.40)
-    parser.add_argument("--HCRL_Lambda_Risk", type=float, default=0.80)
+    parser.add_argument("--HCRL_Lambda_Risk", type=float, default=1.20)
     parser.add_argument("--HCRL_Primal_Dual", action="store_true", default=True)
-    parser.add_argument("--HCRL_Lambda_LR", type=float, default=0.01)
+    parser.add_argument("--HCRL_Lambda_LR", type=float, default=0.008)
     parser.add_argument("--HCRL_Lambda_Min", type=float, default=0.0)
     parser.add_argument("--HCRL_Lambda_Max", type=float, default=3.0)
     parser.add_argument("--HCRL_Parallel_Cost_Discount", type=float, default=0.85)
     parser.add_argument("--HCRL_Mode_Names", nargs="+", default=["single", "serial", "parallel"])
+    # HCRL-v2 adaptive safety recovery. Enabled by default; use --HCRL_No_Safety_Gate for ablation.
+    parser.add_argument("--HCRL_No_Safety_Gate", action="store_true",
+                        help="Ablation: disable HCRL-v2 adaptive safety recovery gate.")
+    parser.add_argument("--HCRL_Safety_Recovery_Mode", choices=["auto", "serial", "parallel"], default="auto",
+                        help="Safety gate recovery mode when learned mode collapses to single.")
+    parser.add_argument("--HCRL_Safety_Min_Backup_Score", type=float, default=0.12,
+                        help="Minimum safety score needed to activate automatic recovery.")
+    parser.add_argument("--HCRL_Safety_Primary_Risk_Threshold", type=float, default=0.52,
+                        help="Primary-risk threshold for preemptive HCRL recovery.")
+    parser.add_argument("--HCRL_Safety_Score_Margin", type=float, default=0.05)
+    parser.add_argument("--HCRL_Final_Success_Bonus", type=float, default=0.35)
+    parser.add_argument("--HCRL_Success_Gain_Bonus", type=float, default=0.45,
+                        help="Extra reward for converting primary failure into final success.")
+    parser.add_argument("--HCRL_Safety_Override_Bonus", type=float, default=0.12)
+
+    # HCRL-v3 risk-budgeted recovery control.
+    # These options reduce the high-cost/high-malicious-exposure behavior observed in v2.
+    parser.add_argument("--HCRL_No_Risk_Budgeted_Gate", action="store_true",
+                        help="Ablation: disable v3 risk-budgeted backup filtering and scoring.")
+    parser.add_argument("--HCRL_Backup_Max_Estimated_Risk", type=float, default=0.42,
+                        help="Maximum estimated backup risk accepted by the safety gate.")
+    parser.add_argument("--HCRL_Backup_Risk_Margin", type=float, default=0.08,
+                        help="Backup should be at least this much safer than risky primary for preemptive recovery.")
+    parser.add_argument("--HCRL_Backup_Cost_Cap", type=float, default=1.05,
+                        help="Soft cap for choosing backup oracle by its standalone cost.")
+    parser.add_argument("--HCRL_Recovery_Cost_Hard_Cap", type=float, default=1.30,
+                        help="Hard cap on effective primary+backup cost for preemptive parallel recovery.")
+    parser.add_argument("--HCRL_Estimated_Risk_Penalty", type=float, default=0.45,
+                        help="Penalty on estimated primary/backup risk in HCRL rewards.")
+    parser.add_argument("--HCRL_Total_Cost_Penalty", type=float, default=0.18,
+                        help="Extra penalty on total/effective cost beyond HCRL_Cost_Budget.")
+    parser.add_argument("--HCRL_Trusted_Selection_Bonus", type=float, default=0.12,
+                        help="Reward bonus for selecting high-trust primary oracle proxy.")
+    parser.add_argument("--HCRL_Backup_Trust_Bonus", type=float, default=0.15,
+                        help="Reward bonus for selecting high-trust backup oracle proxy.")
     parser.add_argument("--HCRL_No_Teacher", action="store_true")
     parser.add_argument("--HCRL_No_Constrained", action="store_true")
     parser.add_argument("--HCRL_No_Decoupled_Reward", action="store_true")
