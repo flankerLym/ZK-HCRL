@@ -242,12 +242,12 @@ def parameter_parser():
     parser.add_argument("--HCRL_Mode_Start_Prob", type=float, default=0.0)
     parser.add_argument("--HCRL_Mode_Min_Prob", type=float, default=0.0)
     parser.add_argument("--HCRL_Primary_Success_Bonus", type=float, default=0.30)
-    parser.add_argument("--HCRL_Backup_Recovery_Bonus", type=float, default=0.72)
-    parser.add_argument("--HCRL_Backup_Used_Penalty", type=float, default=0.08)
-    parser.add_argument("--HCRL_Unnecessary_Backup_Penalty", type=float, default=0.18)
-    parser.add_argument("--HCRL_Skip_Recovery_Penalty", type=float, default=0.20)
+    parser.add_argument("--HCRL_Backup_Recovery_Bonus", type=float, default=0.82)
+    parser.add_argument("--HCRL_Backup_Used_Penalty", type=float, default=0.05)
+    parser.add_argument("--HCRL_Unnecessary_Backup_Penalty", type=float, default=0.10)
+    parser.add_argument("--HCRL_Skip_Recovery_Penalty", type=float, default=0.30)
     parser.add_argument("--HCRL_Primary_Malicious_Penalty", type=float, default=0.80)
-    parser.add_argument("--HCRL_Backup_Malicious_Penalty", type=float, default=1.20)
+    parser.add_argument("--HCRL_Backup_Malicious_Penalty", type=float, default=1.00)
     parser.add_argument("--HCRL_Backup_Guidance_Episodes", type=int, default=20)
     parser.add_argument("--HCRL_Backup_Start_Prob", type=float, default=0.95)
     parser.add_argument("--HCRL_Backup_Min_Prob", type=float, default=0.05)
@@ -268,9 +268,9 @@ def parameter_parser():
                         help="Ablation: disable HCRL-v2 adaptive safety recovery gate.")
     parser.add_argument("--HCRL_Safety_Recovery_Mode", choices=["auto", "serial", "parallel"], default="auto",
                         help="Safety gate recovery mode when learned mode collapses to single.")
-    parser.add_argument("--HCRL_Safety_Min_Backup_Score", type=float, default=0.12,
+    parser.add_argument("--HCRL_Safety_Min_Backup_Score", type=float, default=0.04,
                         help="Minimum safety score needed to activate automatic recovery.")
-    parser.add_argument("--HCRL_Safety_Primary_Risk_Threshold", type=float, default=0.52,
+    parser.add_argument("--HCRL_Safety_Primary_Risk_Threshold", type=float, default=0.46,
                         help="Primary-risk threshold for preemptive HCRL recovery.")
     parser.add_argument("--HCRL_Safety_Score_Margin", type=float, default=0.05)
     parser.add_argument("--HCRL_Final_Success_Bonus", type=float, default=0.35)
@@ -282,22 +282,106 @@ def parameter_parser():
     # These options reduce the high-cost/high-malicious-exposure behavior observed in v2.
     parser.add_argument("--HCRL_No_Risk_Budgeted_Gate", action="store_true",
                         help="Ablation: disable v3 risk-budgeted backup filtering and scoring.")
-    parser.add_argument("--HCRL_Backup_Max_Estimated_Risk", type=float, default=0.42,
+    parser.add_argument("--HCRL_Backup_Max_Estimated_Risk", type=float, default=0.58,
                         help="Maximum estimated backup risk accepted by the safety gate.")
-    parser.add_argument("--HCRL_Backup_Risk_Margin", type=float, default=0.08,
+    parser.add_argument("--HCRL_Backup_Risk_Margin", type=float, default=0.03,
                         help="Backup should be at least this much safer than risky primary for preemptive recovery.")
-    parser.add_argument("--HCRL_Backup_Cost_Cap", type=float, default=1.05,
+    parser.add_argument("--HCRL_Backup_Cost_Cap", type=float, default=1.12,
                         help="Soft cap for choosing backup oracle by its standalone cost.")
-    parser.add_argument("--HCRL_Recovery_Cost_Hard_Cap", type=float, default=1.30,
+    parser.add_argument("--HCRL_Recovery_Cost_Hard_Cap", type=float, default=1.55,
                         help="Hard cap on effective primary+backup cost for preemptive parallel recovery.")
-    parser.add_argument("--HCRL_Estimated_Risk_Penalty", type=float, default=0.45,
+    parser.add_argument("--HCRL_Estimated_Risk_Penalty", type=float, default=0.24,
                         help="Penalty on estimated primary/backup risk in HCRL rewards.")
-    parser.add_argument("--HCRL_Total_Cost_Penalty", type=float, default=0.18,
+    parser.add_argument("--HCRL_Total_Cost_Penalty", type=float, default=0.10,
                         help="Extra penalty on total/effective cost beyond HCRL_Cost_Budget.")
     parser.add_argument("--HCRL_Trusted_Selection_Bonus", type=float, default=0.12,
                         help="Reward bonus for selecting high-trust primary oracle proxy.")
-    parser.add_argument("--HCRL_Backup_Trust_Bonus", type=float, default=0.15,
+    parser.add_argument("--HCRL_Backup_Trust_Bonus", type=float, default=0.18,
                         help="Reward bonus for selecting high-trust backup oracle proxy.")
+
+    # HCRL-v4 balanced residual recovery control.
+    # v3 could become over-conservative in late training and collapse backup usage.
+    # These parameters keep recovery in a moderate useful range instead of hard-filtering it away.
+    parser.add_argument("--HCRL_No_Balanced_Recovery_Gate", action="store_true",
+                        help="Ablation: disable v4 balanced residual recovery gate.")
+    parser.add_argument("--HCRL_Target_Backup_Min", type=float, default=0.24,
+                        help="Soft lower target for recent HCRL backup usage rate.")
+    parser.add_argument("--HCRL_Target_Backup_Max", type=float, default=0.44,
+                        help="Soft upper target for recent HCRL backup usage rate.")
+    parser.add_argument("--HCRL_Backup_Rate_Window", type=int, default=600,
+                        help="Recent request window used to estimate HCRL backup usage rate.")
+    parser.add_argument("--HCRL_Recovery_Need_Threshold", type=float, default=0.28,
+                        help="Base threshold of v5 reliability-targeted recovery-need score.")
+    parser.add_argument("--HCRL_Floor_Threshold_Relief", type=float, default=0.16,
+                        help="How much to lower recovery threshold when backup usage is below target.")
+    parser.add_argument("--HCRL_Overuse_Threshold_Penalty", type=float, default=0.20,
+                        help="How much to raise recovery threshold when backup usage is above target.")
+    parser.add_argument("--HCRL_Backup_Absolute_Risk_Cap", type=float, default=0.78,
+                        help="Loose absolute risk cap for backup recovery.")
+    parser.add_argument("--HCRL_Failure_Need_Weight", type=float, default=0.70)
+    parser.add_argument("--HCRL_Risk_Need_Weight", type=float, default=0.45)
+    parser.add_argument("--HCRL_Backup_Advantage_Weight", type=float, default=0.35)
+    parser.add_argument("--HCRL_Backup_Trust_Gain_Weight", type=float, default=0.18)
+    parser.add_argument("--HCRL_Backup_Score_Weight", type=float, default=0.20)
+    parser.add_argument("--HCRL_Backup_Floor_Weight", type=float, default=0.22)
+    parser.add_argument("--HCRL_Backup_Overuse_Weight", type=float, default=0.26)
+    parser.add_argument("--HCRL_Recovery_Cost_Weight", type=float, default=0.40)
+    parser.add_argument("--HCRL_Backup_Floor_Bonus", type=float, default=0.18)
+    parser.add_argument("--HCRL_Backup_Collapse_Penalty", type=float, default=0.32)
+    parser.add_argument("--HCRL_Backup_Overuse_Penalty", type=float, default=0.10)
+
+    # HCRL-v5 dynamic reliability-targeted recovery control.
+    parser.add_argument("--HCRL_No_Dynamic_Recovery_Target", action="store_true",
+                        help="Ablation: disable v5 dynamic backup target adaptation.")
+    parser.add_argument("--HCRL_Primary_Success_Target", type=float, default=0.70,
+                        help="If recent primary success is below this value, raise recovery target.")
+    parser.add_argument("--HCRL_Final_Success_Target", type=float, default=0.84,
+                        help="If recent final success is below this value, lower recovery threshold and raise target.")
+    parser.add_argument("--HCRL_Primary_Deficit_Target_Boost", type=float, default=0.35,
+                        help="Backup target boost per unit primary-success deficit.")
+    parser.add_argument("--HCRL_Final_Deficit_Target_Boost", type=float, default=0.25,
+                        help="Backup target boost per unit final-success deficit.")
+    parser.add_argument("--HCRL_Target_Backup_Cap", type=float, default=0.54,
+                        help="Maximum dynamic backup target after reliability boosting.")
+    parser.add_argument("--HCRL_Final_Success_Floor_Weight", type=float, default=0.30,
+                        help="Recovery-need bonus when recent final success is below target.")
+    parser.add_argument("--HCRL_High_Trust_Threshold", type=float, default=0.64,
+                        help="Trust threshold used to identify high-quality backup candidates.")
+    parser.add_argument("--HCRL_High_Trust_Backup_Weight", type=float, default=0.18,
+                        help="Recovery-need bonus for high-trust backup candidates.")
+    parser.add_argument("--HCRL_Backup_Success_Bias", type=float, default=0.16,
+                        help="Candidate-selection bias toward backups with high observed validation success.")
+    parser.add_argument("--HCRL_Backup_HighTrust_Bias", type=float, default=0.22,
+                        help="Candidate-selection bias toward high-trust backup candidates.")
+    parser.add_argument("--HCRL_Low_Success_Threshold_Relief", type=float, default=0.06,
+                        help="Lower recovery threshold when recent final success is under target.")
+    parser.add_argument("--HCRL_Reliability_Target_Bonus", type=float, default=0.12,
+                        help="Extra mode reward for successful recovery while recent final success is below target.")
+
+
+    # HCRL-v6 counterfactual advantage recovery planner.
+    # This is a method-level module, not a hyperparameter-only tweak: it estimates
+    # the expected utility of recovery versus primary-only execution and uses that
+    # counterfactual advantage to select/prune serial or parallel backup.
+    parser.add_argument("--HCRL_No_Counterfactual_Gate", action="store_true",
+                        help="Ablation: disable counterfactual advantage recovery planning.")
+    parser.add_argument("--HCRL_CF_Advantage_Threshold", type=float, default=0.04,
+                        help="Minimum counterfactual utility advantage required to trigger proactive recovery.")
+    parser.add_argument("--HCRL_CF_Failure_Threshold", type=float, default=-0.05,
+                        help="Allow recovery after primary failure unless counterfactual advantage is worse than this.")
+    parser.add_argument("--HCRL_CF_Prune_Margin", type=float, default=0.12,
+                        help="Prune recovery when counterfactual advantage is sufficiently negative.")
+    parser.add_argument("--HCRL_CF_Success_Value", type=float, default=2.40)
+    parser.add_argument("--HCRL_CF_Trust_Value", type=float, default=0.30)
+    parser.add_argument("--HCRL_CF_Floor_Value", type=float, default=0.12)
+    parser.add_argument("--HCRL_CF_Cost_Value", type=float, default=0.34)
+    parser.add_argument("--HCRL_CF_Risk_Value", type=float, default=0.62)
+    parser.add_argument("--HCRL_CF_Latency_Value", type=float, default=0.28)
+    parser.add_argument("--HCRL_CF_Overuse_Value", type=float, default=0.35)
+    parser.add_argument("--HCRL_CF_Candidate_Weight", type=float, default=0.45)
+    parser.add_argument("--HCRL_CF_SuccessGain_Candidate_Weight", type=float, default=0.55)
+    parser.add_argument("--HCRL_CF_Mode_Advantage_Bonus", type=float, default=0.35)
+    parser.add_argument("--HCRL_CF_Negative_Recovery_Penalty", type=float, default=0.30)
     parser.add_argument("--HCRL_No_Teacher", action="store_true")
     parser.add_argument("--HCRL_No_Constrained", action="store_true")
     parser.add_argument("--HCRL_No_Decoupled_Reward", action="store_true")

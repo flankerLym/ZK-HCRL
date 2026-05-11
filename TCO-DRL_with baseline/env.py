@@ -13,6 +13,7 @@ class SchedulingEnv:
       - PB-SafeDQN / COBRA primary-backup recovery;
       - HCRL-v2 hierarchical constrained feedback with adaptive safety recovery;
       - GNN-style oracle state encoder;
+      - HCRL-v5 dynamic reliability-targeted recovery gate;
       - complete final-summary getters used by main.py.
     """
 
@@ -94,8 +95,10 @@ class SchedulingEnv:
         self.reputation_timewindow = {}
         for name in self.policy_names:
             # rows: 0 oracle, 1 startT, 2 waitT, 3 duration, 4 leaveT, 5 reward,
-            # 6 exeT, 7 final success, 8 cost, 9 type match.
-            self.events[name] = np.zeros((10, self.requestNum), dtype=float)
+            # 6 exeT, 7 final task success, 8 cost, 9 type match,
+            # 10 on-time completion. success_rate uses row 7;
+            # success_time_rate uses row 10.
+            self.events[name] = np.zeros((11, self.requestNum), dtype=float)
             # rows: 0 idleT, 1 assigned count, 2 reputation, 3 type matches,
             # 4 validation successes.
             self.oracle_events[name] = np.zeros((5, self.oracleNum), dtype=float)
@@ -486,6 +489,9 @@ class SchedulingEnv:
         self.events[policy_name][7, request_id] = success
         self.events[policy_name][8, request_id] = total_cost
         self.events[policy_name][9, request_id] = match
+        # On-time completion is different from final task success.
+        # success_rate uses row 7; success_time_rate uses row 10.
+        self.events[policy_name][10, request_id] = 1.0 if float(final_duration) <= float(self.ddl) else 0.0
 
     def feedback(self, request_attrs, action, policy_name):
         request_id, _, _, _, ddl = request_attrs
@@ -621,106 +627,370 @@ class SchedulingEnv:
         """Backward-compatible wrapper for primary oracle risk."""
         return self._hcrl_oracle_risk_estimate(request_attrs, primary_action, policy_name)
 
-    def _hcrl_backup_candidate(self, request_attrs, primary_action, policy_name):
-        """Return a risk-budgeted same-type backup candidate and adjusted score.
+    def _hcrl_recent_backup_used_rate(self, policy_name, request_id=None):
+        """Recent HCRL backup usage rate used by the balanced recovery gate."""
+        if request_id is None:
+            return 0.0
+        try:
+            rid = int(request_id)
+        except Exception:
+            return 0.0
+        if policy_name not in self.pb_records or rid <= 0:
+            return 0.0
+        window = int(getattr(self.args, "HCRL_Backup_Rate_Window", 600))
+        start = max(0, rid - max(window, 1))
+        values = self.pb_records[policy_name][1, start:rid]
+        if values.size == 0:
+            return 0.0
+        return float(np.mean(values))
 
-        v2 selected the highest safety-score backup, which improved success but
-        increased cost and malicious exposure. v3 re-ranks backups by combining
-        the original safety score with observable trust, estimated risk, cost,
-        and improvement over the primary risk.
+    def _hcrl_recent_primary_success_rate(self, policy_name, request_id=None):
+        """Recent primary success used to adapt the recovery target.
+
+        If the primary selector is still not strong enough, HCRL-v5 deliberately
+        keeps a higher recovery target. This avoids the v3 failure mode where
+        a moderately good primary policy made the gate overconfident and shut
+        recovery down too early.
+        """
+        if request_id is None:
+            return 0.0
+        try:
+            rid = int(request_id)
+        except Exception:
+            return 0.0
+        if policy_name not in self.pb_records or rid <= 0:
+            return 0.0
+        window = int(getattr(self.args, "HCRL_Backup_Rate_Window", 600))
+        start = max(0, rid - max(window, 1))
+        values = self.pb_records[policy_name][0, start:rid]
+        if values.size == 0:
+            return 0.0
+        return float(np.mean(values))
+
+    def _hcrl_recent_final_success_rate(self, policy_name, request_id=None):
+        """Recent final success used by the reliability-targeted recovery gate."""
+        if request_id is None:
+            return 0.0
+        try:
+            rid = int(request_id)
+        except Exception:
+            return 0.0
+        if policy_name not in self.events or rid <= 0:
+            return 0.0
+        window = int(getattr(self.args, "HCRL_Backup_Rate_Window", 600))
+        start = max(0, rid - max(window, 1))
+        values = self.events[policy_name][7, start:rid]
+        if values.size == 0:
+            return 0.0
+        return float(np.mean(values))
+
+    def _hcrl_dynamic_recovery_targets(self, policy_name, request_id=None):
+        """Return dynamic (target_min, target_max) for backup/recovery usage.
+
+        v4 fixed the v3 collapse by enforcing a moderate backup band, but its
+        fixed band can still be suboptimal: when primary success is below the
+        desired reliability level, HCRL should keep more recovery capacity; when
+        the system is already reliable, it should avoid unnecessary parallel cost.
+        """
+        base_min = float(getattr(self.args, "HCRL_Target_Backup_Min", 0.24))
+        base_max = float(getattr(self.args, "HCRL_Target_Backup_Max", 0.44))
+        if getattr(self.args, "HCRL_No_Dynamic_Recovery_Target", False):
+            return base_min, max(base_max, base_min + 0.04)
+
+        primary_rate = self._hcrl_recent_primary_success_rate(policy_name, request_id)
+        final_rate = self._hcrl_recent_final_success_rate(policy_name, request_id)
+        primary_target = float(getattr(self.args, "HCRL_Primary_Success_Target", 0.70))
+        final_target = float(getattr(self.args, "HCRL_Final_Success_Target", 0.84))
+        primary_deficit = max(0.0, primary_target - primary_rate)
+        final_deficit = max(0.0, final_target - final_rate)
+        boost = (
+            float(getattr(self.args, "HCRL_Primary_Deficit_Target_Boost", 0.35)) * primary_deficit
+            + float(getattr(self.args, "HCRL_Final_Deficit_Target_Boost", 0.25)) * final_deficit
+        )
+        cap = float(getattr(self.args, "HCRL_Target_Backup_Cap", 0.54))
+        target_min = float(np.clip(base_min + boost, 0.02, cap - 0.04))
+        target_max = float(np.clip(base_max + boost, target_min + 0.04, cap))
+        return target_min, target_max
+
+    def _hcrl_recovery_need_score(self, request_attrs, primary_action, primary_success,
+                                  backup_action, backup_score, policy_name, request_id=None):
+        """Compute a smooth recovery-need score instead of a hard v3 risk filter.
+
+        v3 failed in long runs because the risk-budgeted gate became too conservative:
+        as the primary selector improved, backup usage collapsed and HCRL lost its
+        recovery advantage. This v4 score keeps recovery alive only when useful by
+        combining primary failure, observable risk, backup safety, remaining cost,
+        and a soft target backup-rate floor.
+        """
+        if int(backup_action) < 0 or int(backup_action) == int(primary_action):
+            return 0.0, self._hcrl_primary_risk_estimate(request_attrs, primary_action, policy_name), 1.0
+
+        primary_risk = self._hcrl_oracle_risk_estimate(request_attrs, primary_action, policy_name)
+        backup_risk = self._hcrl_oracle_risk_estimate(request_attrs, backup_action, policy_name)
+        primary_trust = self._hcrl_trust_proxy(policy_name, primary_action)
+        backup_trust = self._hcrl_trust_proxy(policy_name, backup_action)
+        recent_backup_rate = self._hcrl_recent_backup_used_rate(policy_name, request_id)
+        target_min, target_max = self._hcrl_dynamic_recovery_targets(policy_name, request_id)
+        recent_final_rate = self._hcrl_recent_final_success_rate(policy_name, request_id)
+
+        primary_cost = float(self.oracleCost[int(primary_action)]) if 0 <= int(primary_action) < self.oracleNum else 0.0
+        backup_cost = float(self.oracleCost[int(backup_action)]) if 0 <= int(backup_action) < self.oracleNum else 0.0
+        effective_cost = primary_cost + float(getattr(self.args, "HCRL_Parallel_Cost_Discount", 0.85)) * backup_cost
+        hard_cap = float(getattr(self.args, "HCRL_Recovery_Cost_Hard_Cap", 1.55))
+        cost_over = max(0.0, effective_cost - hard_cap) / max(hard_cap, 1e-8)
+
+        # Positive signals for recovery.
+        failure_need = 1.0 if int(primary_success) == 0 else 0.0
+        risk_need = max(0.0, primary_risk - float(getattr(self.args, "HCRL_Safety_Primary_Risk_Threshold", 0.46)))
+        backup_advantage = max(0.0, primary_risk - backup_risk)
+        trust_gain = max(0.0, backup_trust - primary_trust)
+        score_signal = max(0.0, float(backup_score) - float(getattr(self.args, "HCRL_Safety_Min_Backup_Score", 0.04)))
+        final_success_floor = max(0.0, float(getattr(self.args, "HCRL_Final_Success_Target", 0.84)) - recent_final_rate)
+        high_trust_backup = max(0.0, backup_trust - float(getattr(self.args, "HCRL_High_Trust_Threshold", 0.64)))
+
+        # Floor signal prevents late-stage collapse to primary-only behavior.
+        # It is active only below the lower target; above the upper target it becomes a penalty.
+        floor_signal = max(0.0, target_min - recent_backup_rate) / max(target_min, 1e-8)
+        overuse_signal = max(0.0, recent_backup_rate - target_max) / max(1.0 - target_max, 1e-8)
+
+        need_score = (
+            float(getattr(self.args, "HCRL_Failure_Need_Weight", 0.70)) * failure_need
+            + float(getattr(self.args, "HCRL_Risk_Need_Weight", 0.45)) * risk_need
+            + float(getattr(self.args, "HCRL_Backup_Advantage_Weight", 0.35)) * backup_advantage
+            + float(getattr(self.args, "HCRL_Backup_Trust_Gain_Weight", 0.18)) * trust_gain
+            + float(getattr(self.args, "HCRL_Backup_Score_Weight", 0.20)) * score_signal
+            + float(getattr(self.args, "HCRL_Final_Success_Floor_Weight", 0.30)) * final_success_floor
+            + float(getattr(self.args, "HCRL_High_Trust_Backup_Weight", 0.18)) * high_trust_backup
+            + float(getattr(self.args, "HCRL_Backup_Floor_Weight", 0.22)) * floor_signal
+            - float(getattr(self.args, "HCRL_Backup_Overuse_Weight", 0.30)) * overuse_signal
+            - float(getattr(self.args, "HCRL_Recovery_Cost_Weight", 0.45)) * cost_over
+        )
+        return float(need_score), float(primary_risk), float(backup_risk)
+
+
+    def _hcrl_success_probability_estimate(self, request_attrs, action, policy_name):
+        """Observable probability estimate for counterfactual recovery.
+
+        This is not a ground-truth validation probability. It combines observable
+        trust, historical validation success, reputation, type match, deadline
+        feasibility and behavior risk into a calibrated proxy. HCRL-v6 uses this
+        estimate to compare the counterfactual value of primary-only execution
+        against serial/parallel recovery before spending a backup oracle.
+        """
+        _, arrival_time, length, request_type, ddl = request_attrs
+        a = int(action)
+        if a < 0 or a >= self.oracleNum:
+            return 0.0
+        trust = self._hcrl_trust_proxy(policy_name, a)
+        hist = self._hcrl_oracle_observed_success(policy_name, a)
+        rep = float(np.clip(self.oracle_events[policy_name][2, a], 0.0, 1.0))
+        match = 1.0 if int(self.oracleTypes[a]) == int(request_type) else 0.0
+        wait = max(float(self.oracle_events[policy_name][0, a]) - float(arrival_time), 0.0)
+        exe = float(length) / max(float(self.oracleAcc[a]), 1e-8)
+        deadline_margin = (float(ddl) - wait - exe) / max(float(ddl), 1e-8)
+        time_feasible = float(1.0 / (1.0 + np.exp(-5.0 * deadline_margin)))
+        risk = self._hcrl_oracle_risk_estimate(request_attrs, a, policy_name)
+        p = (
+            0.42 * hist
+            + 0.24 * trust
+            + 0.14 * rep
+            + 0.20 * time_feasible
+        ) * match * (1.0 - 0.55 * risk)
+        return float(np.clip(p, 0.01, 0.99))
+
+    def _hcrl_counterfactual_recovery_advantage(self, request_attrs, primary_action,
+                                                backup_action, policy_name, request_id=None,
+                                                mode="parallel"):
+        """Expected marginal utility of recovery over primary-only execution.
+
+        HCRL-v6 estimates the counterfactual utility difference
+        U(recovery) - U(primary only). Recovery is favoured only when its
+        expected success gain justifies additional cost, latency, risk, and
+        current recovery overuse.
+        """
+        _, _, length, _, ddl = request_attrs
+        if int(backup_action) < 0 or int(backup_action) == int(primary_action):
+            return {"advantage": -1.0, "success_gain": 0.0, "p_primary": 0.0,
+                    "p_recovery": 0.0, "risk_delta": 1.0, "cost_extra": 1.0}
+
+        p_primary = self._hcrl_success_probability_estimate(request_attrs, primary_action, policy_name)
+        p_backup = self._hcrl_success_probability_estimate(request_attrs, backup_action, policy_name)
+        primary_risk = self._hcrl_oracle_risk_estimate(request_attrs, primary_action, policy_name)
+        backup_risk = self._hcrl_oracle_risk_estimate(request_attrs, backup_action, policy_name)
+        backup_cost = float(self.oracleCost[int(backup_action)])
+        discount = float(getattr(self.args, "HCRL_Parallel_Cost_Discount", 0.85))
+
+        remaining = float(ddl) - float(length) / max(float(self.oracleAcc[int(primary_action)]), 1e-8)
+        backup_exe = float(length) / max(float(self.oracleAcc[int(backup_action)]), 1e-8)
+        serial_feasible = 1.0 if remaining > 0 and backup_exe <= remaining else 0.0
+        p_serial = p_primary + (1.0 - p_primary) * p_backup * serial_feasible
+        p_parallel = 1.0 - (1.0 - p_primary) * (1.0 - p_backup)
+
+        if str(mode) == "serial":
+            p_recovery = p_serial
+            cost_extra = backup_cost
+            latency_extra = max(0.0, backup_exe - max(remaining, 0.0)) / max(float(ddl), 1e-8)
+        else:
+            p_recovery = p_parallel
+            cost_extra = discount * backup_cost
+            latency_extra = 0.08
+
+        success_gain = max(0.0, p_recovery - p_primary)
+        trust_gain = max(0.0, self._hcrl_trust_proxy(policy_name, backup_action) - self._hcrl_trust_proxy(policy_name, primary_action))
+        risk_delta = max(0.0, backup_risk - primary_risk)
+        recent_backup_rate = self._hcrl_recent_backup_used_rate(policy_name, request_id)
+        target_min, target_max = self._hcrl_dynamic_recovery_targets(policy_name, request_id)
+        overuse = max(0.0, recent_backup_rate - target_max) / max(1.0 - target_max, 1e-8)
+        floor = max(0.0, target_min - recent_backup_rate) / max(target_min, 1e-8)
+
+        advantage = (
+            float(getattr(self.args, "HCRL_CF_Success_Value", 2.40)) * success_gain
+            + float(getattr(self.args, "HCRL_CF_Trust_Value", 0.30)) * trust_gain
+            + float(getattr(self.args, "HCRL_CF_Floor_Value", 0.12)) * floor
+            - float(getattr(self.args, "HCRL_CF_Cost_Value", 0.34)) * cost_extra
+            - float(getattr(self.args, "HCRL_CF_Risk_Value", 0.62)) * risk_delta
+            - float(getattr(self.args, "HCRL_CF_Latency_Value", 0.28)) * latency_extra
+            - float(getattr(self.args, "HCRL_CF_Overuse_Value", 0.35)) * overuse
+        )
+        return {
+            "advantage": float(advantage),
+            "success_gain": float(success_gain),
+            "p_primary": float(p_primary),
+            "p_recovery": float(p_recovery),
+            "risk_delta": float(risk_delta),
+            "cost_extra": float(cost_extra),
+        }
+
+    def _hcrl_choose_counterfactual_mode(self, request_attrs, primary_action, backup_action,
+                                         policy_name, request_id=None):
+        """Choose serial/parallel by larger counterfactual advantage."""
+        par = self._hcrl_counterfactual_recovery_advantage(
+            request_attrs, primary_action, backup_action, policy_name, request_id, mode="parallel"
+        )
+        ser = self._hcrl_counterfactual_recovery_advantage(
+            request_attrs, primary_action, backup_action, policy_name, request_id, mode="serial"
+        )
+        if ser["advantage"] > par["advantage"]:
+            return 1, ser
+        return 2, par
+
+    def _hcrl_backup_candidate(self, request_attrs, primary_action, policy_name):
+        """Return a balanced backup candidate.
+
+        v4 does not use the v3 hard risk/cost filtering as the main mechanism.
+        It selects a candidate by soft utility and lets the balanced recovery gate
+        decide whether to actually invoke recovery. This prevents the backup policy
+        from disappearing in later episodes.
         """
         candidates = np.where(self.get_backup_action_mask(request_attrs, primary_action))[0]
         if candidates.size == 0:
             return -1, -1e9
 
         score_vec = self._backup_score_vector(request_attrs, primary_action, policy_name)
-        if getattr(self.args, "HCRL_No_Risk_Budgeted_Gate", False):
+        if getattr(self.args, "HCRL_No_Balanced_Recovery_Gate", False):
             best = int(candidates[np.argmax(score_vec[candidates])])
             return best, float(score_vec[best])
 
         primary_risk = self._hcrl_oracle_risk_estimate(request_attrs, primary_action, policy_name)
-        max_risk = float(getattr(self.args, "HCRL_Backup_Max_Estimated_Risk", 0.42))
-        cost_cap = float(getattr(self.args, "HCRL_Backup_Cost_Cap", 1.05))
-        risk_penalty = float(getattr(self.args, "HCRL_Estimated_Risk_Penalty", 0.45))
-        cost_penalty = float(getattr(self.args, "HCRL_Total_Cost_Penalty", 0.18))
-        trust_bonus = float(getattr(self.args, "HCRL_Backup_Trust_Bonus", 0.15))
+        max_risk_soft = float(getattr(self.args, "HCRL_Backup_Max_Estimated_Risk", 0.58))
+        cost_cap_soft = float(getattr(self.args, "HCRL_Backup_Cost_Cap", 1.12))
+        risk_penalty = float(getattr(self.args, "HCRL_Estimated_Risk_Penalty", 0.24))
+        cost_penalty = float(getattr(self.args, "HCRL_Total_Cost_Penalty", 0.10))
+        trust_bonus = float(getattr(self.args, "HCRL_Backup_Trust_Bonus", 0.18))
 
         adjusted = np.full(self.oracleNum, -1e9, dtype=float)
         for c in candidates:
-            risk_c = self._hcrl_oracle_risk_estimate(request_attrs, int(c), policy_name)
-            trust_c = self._hcrl_trust_proxy(policy_name, int(c))
-            cost_c = float(self.oracleCost[int(c)])
+            c = int(c)
+            risk_c = self._hcrl_oracle_risk_estimate(request_attrs, c, policy_name)
+            trust_c = self._hcrl_trust_proxy(policy_name, c)
+            hist_success_c = self._hcrl_oracle_observed_success(policy_name, c)
+            high_trust_c = max(0.0, trust_c - float(getattr(self.args, "HCRL_High_Trust_Threshold", 0.64)))
+            cost_c = float(self.oracleCost[c])
             cost_norm = float(np.clip(cost_c / max(float(np.max(self.oracleCost)), 1e-8), 0.0, 1.0))
             improvement = max(0.0, primary_risk - risk_c)
-            # Soft risk/cost filtering. Extremely risky backups remain possible only if no safer candidate exists.
-            gate_penalty = 0.0
-            if risk_c > max_risk:
-                gate_penalty += 0.65 * (risk_c - max_risk)
-            if cost_c > cost_cap:
-                gate_penalty += 0.25 * (cost_c - cost_cap)
-            adjusted[int(c)] = (
-                float(score_vec[int(c)])
+            cf = self._hcrl_counterfactual_recovery_advantage(
+                request_attrs, primary_action, c, policy_name, None, mode="parallel"
+            )
+            # Soft barriers only. Do not eliminate all backups as v3 did.
+            risk_over = max(0.0, risk_c - max_risk_soft)
+            cost_over = max(0.0, cost_c - cost_cap_soft)
+            adjusted[c] = (
+                float(score_vec[c])
                 + trust_bonus * trust_c
-                + 0.20 * improvement
+                + float(getattr(self.args, "HCRL_Backup_Success_Bias", 0.16)) * hist_success_c
+                + float(getattr(self.args, "HCRL_Backup_HighTrust_Bias", 0.22)) * high_trust_c
+                + 0.28 * improvement
+                + float(getattr(self.args, "HCRL_CF_Candidate_Weight", 0.45)) * cf["advantage"]
+                + float(getattr(self.args, "HCRL_CF_SuccessGain_Candidate_Weight", 0.55)) * cf["success_gain"]
                 - risk_penalty * risk_c
                 - cost_penalty * cost_norm
-                - gate_penalty
+                - 0.20 * risk_over
+                - 0.08 * cost_over
             )
 
-        # Prefer candidates under the soft risk/cost budget when available.
-        safe_candidates = []
-        for c in candidates:
-            if (self._hcrl_oracle_risk_estimate(request_attrs, int(c), policy_name) <= max_risk and
-                    float(self.oracleCost[int(c)]) <= cost_cap):
-                safe_candidates.append(int(c))
-        pool = np.asarray(safe_candidates if safe_candidates else candidates, dtype=int)
-        best = int(pool[np.argmax(adjusted[pool])])
+        best = int(candidates[np.argmax(adjusted[candidates])])
         return best, float(adjusted[best])
 
-    def _hcrl_should_apply_safety_recovery(self, request_attrs, primary_action, primary_success, backup_action, backup_score, policy_name):
-        """Risk-budgeted HCRL-v3 safety gate.
+    def _hcrl_should_apply_safety_recovery(self, request_attrs, primary_action, primary_success,
+                                           backup_action, backup_score, policy_name, request_id=None):
+        """HCRL-v4 balanced residual recovery gate.
 
-        Recovery is activated only when it has a plausible safety/cost benefit.
-        This keeps the success gain from v2 while reducing unnecessary cost and
-        malicious exposure from aggressive parallel recovery.
+        This replaces the v3 hard risk-budgeted gate. The new gate is deliberately
+        *soft*: it maintains a moderate recovery rate instead of letting recovery
+        collapse to nearly zero, while still discouraging high-cost/high-risk backups.
         """
         if getattr(self.args, "HCRL_No_Safety_Gate", False):
             return False, self._hcrl_primary_risk_estimate(request_attrs, primary_action, policy_name)
         if int(backup_action) < 0 or int(backup_action) == int(primary_action):
             return False, self._hcrl_primary_risk_estimate(request_attrs, primary_action, policy_name)
 
-        _, _, _, _, ddl = request_attrs
         primary_risk = self._hcrl_oracle_risk_estimate(request_attrs, primary_action, policy_name)
         backup_risk = self._hcrl_oracle_risk_estimate(request_attrs, backup_action, policy_name)
-        min_score = float(getattr(self.args, "HCRL_Safety_Min_Backup_Score", 0.12))
-        risk_threshold = float(getattr(self.args, "HCRL_Safety_Primary_Risk_Threshold", 0.52))
-        risk_margin = float(getattr(self.args, "HCRL_Backup_Risk_Margin", 0.08))
-        max_backup_risk = float(getattr(self.args, "HCRL_Backup_Max_Estimated_Risk", 0.42))
-        hard_cost_cap = float(getattr(self.args, "HCRL_Recovery_Cost_Hard_Cap", 1.30))
-
-        primary_cost = float(self.oracleCost[int(primary_action)]) if 0 <= int(primary_action) < self.oracleNum else 0.0
-        backup_cost = float(self.oracleCost[int(backup_action)]) if 0 <= int(backup_action) < self.oracleNum else 0.0
-        effective_parallel_cost = primary_cost + float(getattr(self.args, "HCRL_Parallel_Cost_Discount", 0.85)) * backup_cost
-        cost_ok = effective_parallel_cost <= hard_cost_cap
-        risk_ok = backup_risk <= max_backup_risk or backup_risk <= (primary_risk - risk_margin)
-        score_ok = float(backup_score) >= min_score
-
-        # After observed primary failure, allow recovery if the backup is not worse and the cost is bounded.
-        fail_trigger = (
-            int(primary_success) == 0
-            and score_ok
-            and cost_ok
-            and backup_risk <= max(max_backup_risk, primary_risk - 0.02)
+        need_score, primary_risk, backup_risk = self._hcrl_recovery_need_score(
+            request_attrs, primary_action, primary_success, backup_action, backup_score, policy_name, request_id
         )
-        # Before failure, only preempt when primary risk is high and backup is meaningfully safer.
-        risk_trigger = (
-            primary_risk >= risk_threshold
-            and score_ok
-            and cost_ok
-            and risk_ok
-            and (primary_risk - backup_risk) >= risk_margin
-        )
-        return bool(fail_trigger or risk_trigger), primary_risk
+        recent_backup_rate = self._hcrl_recent_backup_used_rate(policy_name, request_id)
+        target_min, target_max = self._hcrl_dynamic_recovery_targets(policy_name, request_id)
+        recent_final_rate = self._hcrl_recent_final_success_rate(policy_name, request_id)
+        base_threshold = float(getattr(self.args, "HCRL_Recovery_Need_Threshold", 0.28))
+
+        # Dynamic threshold: lower it if recovery is collapsing; raise it if overused.
+        if recent_backup_rate < target_min:
+            threshold = base_threshold - float(getattr(self.args, "HCRL_Floor_Threshold_Relief", 0.16)) * (target_min - recent_backup_rate) / max(target_min, 1e-8)
+        elif recent_backup_rate > target_max:
+            threshold = base_threshold + float(getattr(self.args, "HCRL_Overuse_Threshold_Penalty", 0.20)) * (recent_backup_rate - target_max) / max(1.0 - target_max, 1e-8)
+        else:
+            threshold = base_threshold
+        if recent_final_rate < float(getattr(self.args, "HCRL_Final_Success_Target", 0.84)):
+            threshold -= float(getattr(self.args, "HCRL_Low_Success_Threshold_Relief", 0.06))
+        threshold = float(np.clip(threshold, 0.06, 0.58))
+
+        # Never use obviously unsafe or impossible backup, but keep this cap looser than v3.
+        if backup_risk > float(getattr(self.args, "HCRL_Backup_Absolute_Risk_Cap", 0.78)):
+            return False, primary_risk
+        if float(backup_score) < float(getattr(self.args, "HCRL_Safety_Min_Backup_Score", 0.04)) and int(primary_success) == 1:
+            return False, primary_risk
+
+        # HCRL-v6: counterfactual recovery advantage gate.
+        if not getattr(self.args, "HCRL_No_Counterfactual_Gate", False):
+            _, cf = self._hcrl_choose_counterfactual_mode(
+                request_attrs, primary_action, backup_action, policy_name, request_id
+            )
+            cf_thr = float(getattr(self.args, "HCRL_CF_Advantage_Threshold", 0.04))
+            cf_fail_thr = float(getattr(self.args, "HCRL_CF_Failure_Threshold", -0.05))
+            if int(primary_success) == 0 and cf["advantage"] >= cf_fail_thr:
+                return True, primary_risk
+            if cf["advantage"] >= cf_thr:
+                return True, primary_risk
+            if cf["advantage"] < -float(getattr(self.args, "HCRL_CF_Prune_Margin", 0.12)) and recent_backup_rate >= target_min:
+                return False, primary_risk
+
+        # If primary failed, allow recovery unless backup is clearly worse and recovery is overused.
+        if int(primary_success) == 0:
+            if recent_backup_rate <= target_max or backup_risk <= primary_risk + 0.12:
+                return True, primary_risk
+
+        return bool(need_score >= threshold), primary_risk
 
     def _should_use_backup(self, request_attrs, primary, backup_action, backup_score, policy_name):
         if int(backup_action) == int(primary["action"]):
@@ -953,8 +1223,12 @@ class SchedulingEnv:
         )
 
         safety_trigger, primary_risk_estimate = self._hcrl_should_apply_safety_recovery(
-            request_attrs, primary_action, primary_success, backup_action, backup_score, policy_name
+            request_attrs, primary_action, primary_success, backup_action, backup_score, policy_name, request_id
         )
+        cf_mode, cf_info = self._hcrl_choose_counterfactual_mode(
+            request_attrs, primary_action, backup_action, policy_name, request_id
+        )
+        recent_backup_rate = self._hcrl_recent_backup_used_rate(policy_name, request_id)
         backup_risk_estimate = (
             self._hcrl_oracle_risk_estimate(request_attrs, backup_action, policy_name)
             if backup_action >= 0 and backup_action != primary_action else 1.0
@@ -971,11 +1245,17 @@ class SchedulingEnv:
             elif recovery_mode == "parallel":
                 mode_action = 2
             else:
-                # Use serial only when there is enough remaining deadline after
-                # the primary attempt; otherwise choose parallel warm-standby.
-                remaining = ddl - float(primary["durationT"])
-                estimated_exe = float(length) / max(float(self.oracleAcc[int(backup_action)]), 1e-8)
-                mode_action = 1 if (primary_success == 0 and remaining > 0 and estimated_exe <= remaining) else 2
+                # HCRL-v6: choose serial or parallel by counterfactual advantage.
+                mode_action = cf_mode
+
+        # HCRL-v6: counterfactual pruning of unnecessary recovery.
+        if (not getattr(self.args, "HCRL_No_Counterfactual_Gate", False)) and mode_action in [1, 2]:
+            final_target = float(getattr(self.args, "HCRL_Final_Success_Target", 0.84))
+            recent_final = self._hcrl_recent_final_success_rate(policy_name, request_id)
+            if (primary_success == 1
+                    and cf_info["advantage"] < -float(getattr(self.args, "HCRL_CF_Prune_Margin", 0.12))
+                    and recent_final >= final_target - 0.025):
+                mode_action = 0
 
         # mode 0 = single, 1 = serial, 2 = parallel
         if mode_action == 1:
@@ -1066,8 +1346,25 @@ class SchedulingEnv:
         mode_reward += float(getattr(self.args, "HCRL_Primary_Success_Bonus", 0.30)) * primary_success
         mode_reward += float(getattr(self.args, "HCRL_Backup_Recovery_Bonus", 0.72)) * backup_recovery
         mode_reward += float(getattr(self.args, "HCRL_Success_Gain_Bonus", 0.45)) * max(0, final_success - primary_success)
-        mode_reward += float(getattr(self.args, "HCRL_Safety_Override_Bonus", 0.12)) * safety_overrode * final_success
-        # v3: explicit success-risk-cost trade-off shaping.
+        if final_success == 1 and self._hcrl_recent_final_success_rate(policy_name, request_id) < float(getattr(self.args, "HCRL_Final_Success_Target", 0.84)):
+            mode_reward += float(getattr(self.args, "HCRL_Reliability_Target_Bonus", 0.12))
+        mode_reward += float(getattr(self.args, "HCRL_Safety_Override_Bonus", 0.10)) * safety_overrode * final_success
+        if not getattr(self.args, "HCRL_No_Counterfactual_Gate", False):
+            mode_reward += float(getattr(self.args, "HCRL_CF_Mode_Advantage_Bonus", 0.35)) * max(0.0, cf_info["advantage"]) * backup_used
+            mode_reward -= float(getattr(self.args, "HCRL_CF_Negative_Recovery_Penalty", 0.30)) * max(0.0, -cf_info["advantage"]) * backup_used
+        # v4: target recovery-rate shaping.  It prevents late collapse to primary-only
+        # while still discouraging overuse.
+        target_min, target_max = self._hcrl_dynamic_recovery_targets(policy_name, request_id)
+        if backup_used and recent_backup_rate < target_min:
+            mode_reward += float(getattr(self.args, "HCRL_Backup_Floor_Bonus", 0.16))
+        if (primary_success == 0) and (not backup_used) and recent_backup_rate < target_min:
+            mode_reward -= float(getattr(self.args, "HCRL_Backup_Collapse_Penalty", 0.28))
+        if backup_used and primary_success and recent_backup_rate > target_max:
+            overuse_penalty = float(getattr(self.args, "HCRL_Backup_Overuse_Penalty", 0.10))
+            if self._hcrl_recent_final_success_rate(policy_name, request_id) < float(getattr(self.args, "HCRL_Final_Success_Target", 0.84)):
+                overuse_penalty *= 0.55
+            mode_reward -= overuse_penalty
+        # v4: explicit success-risk-cost trade-off shaping.
         mode_reward += float(getattr(self.args, "HCRL_Trusted_Selection_Bonus", 0.12)) * primary_trust_proxy
         mode_reward += float(getattr(self.args, "HCRL_Backup_Trust_Bonus", 0.15)) * backup_trust_proxy * backup_used
         mode_reward -= float(getattr(self.args, "HCRL_Backup_Used_Penalty", 0.08)) * backup_used
@@ -1239,9 +1536,22 @@ class SchedulingEnv:
     def get_successTimes(self, Baseline_num, startP, request_c):
         return self._window_event_mean(7, Baseline_num, startP, request_c)
 
-    def get_successInTime(self, Baseline_num, startP, request_c):
-        return self._window_event_mean(7, Baseline_num, startP, request_c)
+    def get_successInTime(self, Baseline_num, startP, endP):
+        """Window on-time completion rate, not final task success.
 
+        success_rate counts final task success (row 7).
+        success_time_rate counts whether the attempt/recovery completed within deadline (row 10).
+        """
+        result = np.zeros(Baseline_num, dtype=float)
+        startP = int(max(startP, 0))
+        endP = int(min(endP, self.requestNum))
+        denom = max(endP - startP, 1)
+        for i, name in enumerate(self.policy_names[:Baseline_num]):
+            if self.events[name].shape[0] > 10:
+                result[i] = float(np.sum(self.events[name][10, startP:endP]) / denom)
+            else:
+                result[i] = float(np.sum(self.events[name][7, startP:endP]) / denom)
+        return result
     def _window_event_mean(self, row, Baseline_num, startP=0, endP=None):
         out = np.zeros(Baseline_num, dtype=float)
         startP = int(max(0, startP))
@@ -1264,10 +1574,17 @@ class SchedulingEnv:
     def get_totalSuccess(self, Baseline_num, startP=0, endP=None):
         return self._window_event_mean(7, Baseline_num, startP, endP)
 
-    def get_totalSuccessInTime(self, Baseline_num, startP=0, endP=None):
-        # Current success definition already includes the deadline condition.
-        return self._window_event_mean(7, Baseline_num, startP, endP)
-
+    def get_totalSuccessInTime(self, Baseline_num, startP=0):
+        """Total on-time completion rate from startP to the end of the workload."""
+        result = np.zeros(Baseline_num, dtype=float)
+        startP = int(max(startP, 0))
+        denom = max(self.requestNum - startP, 1)
+        for i, name in enumerate(self.policy_names[:Baseline_num]):
+            if self.events[name].shape[0] > 10:
+                result[i] = float(np.sum(self.events[name][10, startP:]) / denom)
+            else:
+                result[i] = float(np.sum(self.events[name][7, startP:]) / denom)
+        return result
     def get_totalTimes(self, Baseline_num, startP=0, endP=None):
         # Finish time is the maximum leave time in the evaluation window.
         out = np.zeros(Baseline_num, dtype=float)
