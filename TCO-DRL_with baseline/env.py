@@ -3,25 +3,23 @@ from scipy import stats
 
 
 class SchedulingEnv:
-    """Scalable oracle-selection environment for TCO-DRL / HCRL-Oracle.
+    """Audit-aware oracle-selection environment.
 
-    Complete replacement env.py compatible with the current paper-version main.py.
-    It includes:
-      - scalable oracle communities;
-      - validation-aware success and risk-aware reward;
-      - type action masks;
-      - PB-SafeDQN / COBRA primary-backup recovery;
-      - HCRL-v2 hierarchical constrained feedback with adaptive safety recovery;
-      - GNN-style oracle state encoder;
-      - HCRL-v5 dynamic reliability-targeted recovery gate;
-      - complete final-summary getters used by main.py.
+    This is a complete drop-in replacement for the project folder.  It preserves
+    the original TCO-DRL baselines and adds:
+      - five HCRL modes: single_cost, single_safe, serial_safe, parallel_fast,
+        parallel_safe;
+      - hidden/risk-triggered audit posterior for every policy/oracle;
+      - asymmetric reputation update: fast penalty, slow recovery;
+      - mode masks based on deadline, backup quality, cost pressure and audit risk;
+      - diagnostics for primary/backup recovery and audit behavior.
     """
 
     def __init__(self, args):
         self.args = args
         self.policy_names = list(args.Baselines)
         self.policy_num = len(self.policy_names)
-        self.policy_name_to_id = {name: idx for idx, name in enumerate(self.policy_names)}
+        self.policy_name_to_id = {n: i for i, n in enumerate(self.policy_names)}
         self._load_static_settings(args)
         self._init_state_shape()
         self.arrival_Times = np.zeros(self.requestNum, dtype=float)
@@ -39,7 +37,6 @@ class SchedulingEnv:
         self.oracleNum = int(args.Oracle_Num)
         if self.oracleNum != len(self.oracleTypes):
             raise ValueError("Oracle_Num must equal len(Oracle_Type)")
-
         self.oracleCapacity = float(args.Oracle_capacity)
         self.actionNum = self.oracleNum
         self.oracleInitialReputation = float(args.Oracle_Initial_Reputation)
@@ -48,9 +45,7 @@ class SchedulingEnv:
         self.oracleToken = np.asarray(args.Oracle_Tokens, dtype=float)
         self.oracleBehaviorProbs = np.asarray(args.Oracle_Behavior_Probs, dtype=float)
         self.oracleValidationProbs = np.asarray(args.Oracle_Validation_Probs, dtype=float)
-        self.oracleFatigueSensitivity = np.asarray(
-            getattr(args, "Oracle_Fatigue_Sensitivity", [0.0] * self.oracleNum), dtype=float
-        )
+        self.oracleFatigueSensitivity = np.asarray(getattr(args, "Oracle_Fatigue_Sensitivity", [0.0] * self.oracleNum), dtype=float)
         self.malicious_oracles = list(getattr(args, "Malicious_Oracle_Index", []))
         self.normal_oracles = list(getattr(args, "Normal_Oracle_Index", []))
         self.trusted_oracles = list(getattr(args, "Trusted_Oracle_Index", []))
@@ -65,15 +60,9 @@ class SchedulingEnv:
         self.timewindowSize = int(args.Time_Window_Size)
         self.timeperiodSize = int(args.Time_Period_Size)
         self.timeperiodNum = int(self.requestNum / max(self.timeperiodSize, 1)) + 2
-
-        # Defensive shape checks. This makes errors obvious if param_parser changes.
-        for name, arr in [
-            ("Oracle_Acc", self.oracleAcc),
-            ("Oracle_Cost", self.oracleCost),
-            ("Oracle_Tokens", self.oracleToken),
-            ("Oracle_Validation_Probs", self.oracleValidationProbs),
-            ("Oracle_Fatigue_Sensitivity", self.oracleFatigueSensitivity),
-        ]:
+        for name, arr in [("Oracle_Acc", self.oracleAcc), ("Oracle_Cost", self.oracleCost),
+                          ("Oracle_Tokens", self.oracleToken), ("Oracle_Validation_Probs", self.oracleValidationProbs),
+                          ("Oracle_Fatigue_Sensitivity", self.oracleFatigueSensitivity)]:
             if len(arr) != self.oracleNum:
                 raise ValueError(f"{name} length must equal Oracle_Num")
         if self.oracleBehaviorProbs.shape[0] != self.oracleNum:
@@ -83,9 +72,10 @@ class SchedulingEnv:
         if self.args.State_Mode == "original":
             self.s_features = 1 + 2 * self.oracleNum
         else:
-            # request type, request length, deadline + 8 features per oracle.
-            # GNN keeps the same dimensionality, so model.py does not need changes.
-            self.s_features = 3 + 8 * self.oracleNum
+            # request type, length, deadline + 12 oracle features.
+            self.s_features = 3 + 12 * self.oracleNum
+        # mode state uses base state + 10 risk/audit summaries.
+        self.mode_extra_features = 10
 
     def _init_policy_records(self):
         self.events = {}
@@ -94,49 +84,50 @@ class SchedulingEnv:
         self.oracle_reputation_history = {}
         self.reputation_timewindow = {}
         for name in self.policy_names:
-            # rows: 0 oracle, 1 startT, 2 waitT, 3 duration, 4 leaveT, 5 reward,
-            # 6 exeT, 7 final task success, 8 cost, 9 type match,
-            # 10 on-time completion. success_rate uses row 7;
-            # success_time_rate uses row 10.
             self.events[name] = np.zeros((11, self.requestNum), dtype=float)
-            # rows: 0 idleT, 1 assigned count, 2 reputation, 3 type matches,
-            # 4 validation successes.
             self.oracle_events[name] = np.zeros((5, self.oracleNum), dtype=float)
             self.oracle_events[name][2] = self.oracleInitialReputation
-            # rows: 0 count, 1 validation successes, 2 total duration,
-            # 3 behavior-risk sum.
             self.reputation_factors[name] = np.zeros((4, self.oracleNum), dtype=float)
             self.oracle_reputation_history[name] = np.zeros((self.timeperiodNum, self.oracleNum), dtype=float)
             self.reputation_timewindow[name] = np.zeros((0, self.oracleNum), dtype=float)
 
-        # Primary-backup / HCRL diagnostics:
         # 0 primary_success, 1 backup_used, 2 backup_success, 3 backup_recovery,
         # 4 primary_action, 5 backup_action, 6 primary_malicious, 7 backup_malicious,
-        # 8 primary_trusted, 9 backup_trusted, 10 backup_skipped,
-        # 11 backup_score, 12 HCRL mode, 13 single, 14 serial, 15 parallel,
-        # 16 any constraint violation, 17 cost violation, 18 latency violation,
-        # 19 risk violation, 20 lambda_cost, 21 lambda_latency, 22 lambda_risk.
+        # 8 primary_trusted, 9 backup_trusted, 10 backup_skipped, 11 backup_score,
+        # 12 mode id, 13 single-like, 14 serial-like, 15 parallel-like,
+        # 16 any violation, 17 cost violation, 18 latency violation, 19 risk violation,
+        # 20 lambda_cost, 21 lambda_latency, 22 lambda_risk.
         self.pb_records = {name: np.zeros((23, self.requestNum), dtype=float) for name in self.policy_names}
         for name in self.policy_names:
             self.pb_records[name][4, :] = -1
             self.pb_records[name][5, :] = -1
             self.pb_records[name][12, :] = -1
-
         self.backup_score_history = {name: [] for name in self.policy_names}
-        self.hcrl_lambdas = {
-            name: {
-                "cost": float(getattr(self.args, "HCRL_Lambda_Cost", 0.55)),
-                "latency": float(getattr(self.args, "HCRL_Lambda_Latency", 0.40)),
-                "risk": float(getattr(self.args, "HCRL_Lambda_Risk", 0.80)),
-            }
-            for name in self.policy_names
-        }
+        self.hcrl_lambdas = {name: {"cost": float(getattr(self.args, "HCRL_Lambda_Cost", 0.70)),
+                                    "latency": float(getattr(self.args, "HCRL_Lambda_Latency", 0.40)),
+                                    "risk": float(getattr(self.args, "HCRL_Lambda_Risk", 1.20))}
+                             for name in self.policy_names}
+        self._init_audit_records()
+
+    def _init_audit_records(self):
+        a0 = float(getattr(self.args, "Audit_Alpha0", 2.0))
+        b0 = float(getattr(self.args, "Audit_Beta0", 2.0))
+        self.audit_alpha = {n: np.full(self.oracleNum, a0, dtype=float) for n in self.policy_names}
+        self.audit_beta = {n: np.full(self.oracleNum, b0, dtype=float) for n in self.policy_names}
+        self.audit_clean_streak = {n: np.zeros(self.oracleNum, dtype=float) for n in self.policy_names}
+        self.audit_cooldown = {n: np.zeros(self.oracleNum, dtype=float) for n in self.policy_names}
+        self.audit_last_step = {n: np.full(self.oracleNum, -1.0, dtype=float) for n in self.policy_names}
+        self.audit_pass_count = {n: np.zeros(self.oracleNum, dtype=float) for n in self.policy_names}
+        self.audit_fail_count = {n: np.zeros(self.oracleNum, dtype=float) for n in self.policy_names}
+        # rows 0 audit_trigger, 1 audit_pass, 2 audit_fail, 3 audited_selected_oracle_truth_score_mean.
+        self.audit_records = {n: np.zeros((4, self.requestNum), dtype=float) for n in self.policy_names}
+        self.global_step = 0
 
     def reset(self, args):
         self.args = args
         self.policy_names = list(args.Baselines)
         self.policy_num = len(self.policy_names)
-        self.policy_name_to_id = {name: idx for idx, name in enumerate(self.policy_names)}
+        self.policy_name_to_id = {n: i for i, n in enumerate(self.policy_names)}
         self._load_static_settings(args)
         self._init_state_shape()
         self.arrival_Times = np.zeros(self.requestNum, dtype=float)
@@ -149,47 +140,32 @@ class SchedulingEnv:
     def gen_workload(self, lamda):
         lamda = max(float(lamda), 1e-8)
         intervalT = stats.expon.rvs(scale=1.0 / lamda * 60.0, size=self.requestNum)
-        self.arrival_Times = np.around(intervalT.cumsum(), decimals=3)
-        self.requestsMI = np.maximum(
-            np.random.normal(self.requestMI, self.requestMI_std, self.requestNum).astype(int), 1
-        )
+        self.arrival_Times = np.around(intervalT.cumsum(), 3)
+        self.requestsMI = np.maximum(np.random.normal(self.requestMI, self.requestMI_std, self.requestNum).astype(int), 1)
         self.lengths = self.requestsMI / max(self.oracleCapacity, 1e-8)
-
         service_type_num = int(np.max(self.oracleTypes)) + 1
         if getattr(self.args, "Scenario", "static") in ["rl_hard", "rl_harder"]:
             burstiness = float(getattr(self.args, "Burstiness", 0.80))
             types = np.zeros(self.requestNum, dtype=int)
             types[0] = np.random.randint(0, service_type_num)
             for i in range(1, self.requestNum):
-                if np.random.rand() < burstiness:
-                    types[i] = types[i - 1]
-                else:
-                    types[i] = np.random.randint(0, service_type_num)
+                types[i] = types[i - 1] if np.random.rand() < burstiness else np.random.randint(0, service_type_num)
             self.request_type = types
         else:
             self.request_type = np.random.choice(np.arange(service_type_num), size=self.requestNum)
-
-        print("intervalT mean: ", round(float(np.mean(intervalT)), 3),
-              "  intervalT SD:", round(float(np.std(intervalT, ddof=1)), 3))
+        print("intervalT mean: ", round(float(np.mean(intervalT)), 3), "  intervalT SD:", round(float(np.std(intervalT, ddof=1)), 3))
         print("last request arrivalT:", round(float(self.arrival_Times[-1]), 3))
-        print("MI mean: ", round(float(np.mean(self.requestsMI)), 3),
-              "  MI SD:", round(float(np.std(self.requestsMI, ddof=1)), 3))
-        print("length mean: ", round(float(np.mean(self.lengths)), 3),
-              "  length SD:", round(float(np.std(self.lengths, ddof=1)), 3))
+        print("MI mean: ", round(float(np.mean(self.requestsMI)), 3), "  MI SD:", round(float(np.std(self.requestsMI, ddof=1)), 3))
+        print("length mean: ", round(float(np.mean(self.lengths)), 3), "  length SD:", round(float(np.std(self.lengths, ddof=1)), 3))
 
     def workload(self, request_count):
         request_id = int(request_count) - 1
-        attrs = [
-            request_id,
-            float(self.arrival_Times[request_id]),
-            float(self.lengths[request_id]),
-            int(self.request_type[request_id]),
-            float(self.ddl),
-        ]
+        attrs = [request_id, float(self.arrival_Times[request_id]), float(self.lengths[request_id]),
+                 int(self.request_type[request_id]), float(self.ddl)]
         return request_count == self.requestNum, attrs
 
     # ------------------------------------------------------------------
-    # Reputation and state encoding
+    # Reputation, audit, state encoding
     # ------------------------------------------------------------------
     def initial_reputation(self):
         for name in self.policy_names:
@@ -207,6 +183,22 @@ class SchedulingEnv:
     def get_reputation_factors(self, policy_name):
         return self.reputation_factors[policy_name]
 
+    def audit_truth_score(self, policy_name):
+        return self.audit_alpha[policy_name] / np.maximum(self.audit_alpha[policy_name] + self.audit_beta[policy_name], 1e-8)
+
+    def _audit_cooldown_fraction(self, policy_name):
+        steps = max(float(getattr(self.args, "Audit_Cooldown_Steps", 300)), 1.0)
+        return np.clip(self.audit_cooldown[policy_name] / steps, 0.0, 1.0)
+
+    def _effective_reputation_vector(self, policy_name):
+        base = np.clip(self.oracle_events[policy_name][2], 0.0, 1.0)
+        if not getattr(self.args, "Use_Audit_Reputation", True):
+            return base
+        w = float(getattr(self.args, "Audit_Weight_In_Reputation", 0.30))
+        truth = self.audit_truth_score(policy_name)
+        cooldown_penalty = float(getattr(self.args, "Audit_Cooldown_Penalty", 0.12)) * self._audit_cooldown_fraction(policy_name)
+        return np.clip((1.0 - w) * base + w * truth - cooldown_penalty, 0.0, 1.0)
+
     def update_reputation(self, reputation_attributes, time_period, policy_name):
         counts = reputation_attributes[0]
         val = reputation_attributes[1]
@@ -215,115 +207,94 @@ class SchedulingEnv:
         recent_success = (val + self.oracleInitialReputation * 2.0) / np.maximum(counts + 2.0, 1e-8)
         behavior_penalty = np.log1p(np.maximum(behavior / np.maximum(counts, 1.0), 0.0)) / np.log1p(100.0)
         new_rep = np.clip(0.70 * old + 0.30 * (recent_success - 0.35 * behavior_penalty), 0.0, 1.0)
+        # Audit posterior participates in the effective reputation used by state/action/reward.
+        if getattr(self.args, "Use_Audit_Reputation", True):
+            w = float(getattr(self.args, "Audit_Weight_In_Reputation", 0.30))
+            new_rep = np.clip((1.0 - w) * new_rep + w * self.audit_truth_score(policy_name)
+                              - float(getattr(self.args, "Audit_Cooldown_Penalty", 0.12)) * self._audit_cooldown_fraction(policy_name), 0.0, 1.0)
         self.oracle_events[policy_name][2] = new_rep
         tp = int(min(max(time_period, 0), self.timeperiodNum - 1))
         self.oracle_reputation_history[policy_name][tp] = new_rep
-        self.reputation_timewindow[policy_name] = np.vstack(
-            (self.reputation_timewindow[policy_name], new_rep[None, :])
-        )[-self.timewindowSize:]
+        self.reputation_timewindow[policy_name] = np.vstack((self.reputation_timewindow[policy_name], new_rep[None, :]))[-self.timewindowSize:]
 
     def _policy_uses_gnn(self, policy_name):
-        if not getattr(self.args, "Use_GNN_Encoder", False):
-            return False
-        if getattr(self.args, "Disable_GNN_Encoder", False):
+        if not getattr(self.args, "Use_GNN_Encoder", False) or getattr(self.args, "Disable_GNN_Encoder", False):
             return False
         if policy_name == "HCRL-Oracle":
             return True
-        if getattr(self.args, "Use_GNN_For_All_RL", False) and policy_name in [
-            "DQN", "PPO", "RA-DDQN", "PB-SafeDQN", "COBRA-Oracle"
-        ]:
-            return True
-        return False
-
-    def getState(self, request_attrs, policy_name):
-        _, arrival_time, length, request_type, ddl = request_attrs
-        request_type = int(request_type)
-        if self.args.State_Mode == "original":
-            state = np.hstack(([
-                request_type
-            ], self.oracle_events[policy_name][0] - float(arrival_time), self.oracle_events[policy_name][2]))
-            return np.nan_to_num(state.astype(float), nan=0.0, posinf=10.0, neginf=-10.0)
-
-        oracle_features = self._base_oracle_features(request_attrs, policy_name)
-        if self._policy_uses_gnn(policy_name):
-            oracle_features = self._graph_encode_oracles(oracle_features, request_type)
-
-        mean_len = float(getattr(self.args, "Request_len_Mean", 6000)) / max(float(getattr(self.args, "Oracle_capacity", 1000)), 1e-8)
-        prefix = np.array([
-            request_type / max(float(np.max(self.oracleTypes)), 1.0),
-            float(length) / max(mean_len, 1e-8),
-            float(ddl) / max(float(getattr(self.args, "Harder_Request_DDL", 6.6)), 1e-8),
-        ], dtype=float)
-        state = np.hstack((prefix, oracle_features.reshape(-1)))
-        return np.nan_to_num(state.astype(float), nan=0.0, posinf=10.0, neginf=-10.0)
+        return bool(getattr(self.args, "Use_GNN_For_All_RL", False) and policy_name in ["DQN", "PPO", "RA-DDQN", "PB-SafeDQN", "COBRA-Oracle"])
 
     def _base_oracle_features(self, request_attrs, policy_name):
         _, arrival_time, length, request_type, ddl = request_attrs
         request_type = int(request_type)
         wait = np.maximum(self.oracle_events[policy_name][0] - float(arrival_time), 0.0)
         wait_norm = np.clip(wait / max(float(ddl), 1e-8), 0.0, 3.0) / 3.0
-        rep = np.clip(self.oracle_events[policy_name][2], 0.0, 1.0)
+        rep = self._effective_reputation_vector(policy_name)
         cost_norm = np.clip(self.oracleCost / max(float(np.max(self.oracleCost)), 1e-8), 0.0, 1.0)
         acc_norm = np.clip(self.oracleAcc / max(float(np.max(self.oracleAcc)), 1e-8), 0.0, 1.0)
         type_match = (self.oracleTypes == request_type).astype(float)
-
         counts = self.reputation_factors[policy_name][0]
         val = self.reputation_factors[policy_name][1]
         token_norm = np.clip(self.oracleToken / max(float(np.max(self.oracleToken)), 1e-8), 0.0, 1.0)
         prior = 0.5 * rep + 0.5 * token_norm
         observed_success = (val + 2.0 * prior) / np.maximum(counts + 2.0, 1e-8)
-        if getattr(self.args, "Expose_Validation_Prob", False):
-            validation_feature = np.asarray(self.oracleValidationProbs, dtype=float)
-        else:
-            validation_feature = np.asarray(observed_success, dtype=float)
+        validation_feature = np.asarray(self.oracleValidationProbs, dtype=float) if getattr(self.args, "Expose_Validation_Prob", False) else observed_success
         recent_load = np.clip(counts / max(float(self.timeperiodSize), 1.0), 0.0, 1.0)
         behavior = self.reputation_factors[policy_name][3] / np.maximum(counts, 1.0)
         behavior_risk = np.clip(np.log1p(np.maximum(behavior, 0.0)) / np.log1p(100.0), 0.0, 1.0)
         delay_est = np.clip((wait + float(length) / np.maximum(self.oracleAcc, 1e-8)) / max(float(ddl), 1e-8), 0.0, 2.0) / 2.0
-
+        audit_truth = self.audit_truth_score(policy_name)
+        audit_fail_rate = self.audit_beta[policy_name] / np.maximum(self.audit_alpha[policy_name] + self.audit_beta[policy_name], 1e-8)
+        cooldown = self._audit_cooldown_fraction(policy_name)
         return np.vstack((
-            wait_norm,
-            rep,
-            cost_norm,
-            acc_norm,
-            type_match,
-            validation_feature,
-            recent_load,
-            0.5 * behavior_risk + 0.5 * delay_est,
+            wait_norm, rep, cost_norm, acc_norm, type_match, validation_feature,
+            recent_load, 0.5 * behavior_risk + 0.5 * delay_est,
+            token_norm, audit_truth, audit_fail_rate, cooldown,
         )).T
 
     def _graph_encode_oracles(self, features, request_type):
         h = np.asarray(features, dtype=float).copy()
-        n = h.shape[0]
-        if n == 0:
+        if h.shape[0] == 0:
             return h
         same_service = (self.oracleTypes[:, None] == self.oracleTypes[None, :]).astype(float)
         reliability = 1.0 - np.abs(h[:, 5][:, None] - h[:, 5][None, :])
         load_similarity = 1.0 - np.abs(h[:, 6][:, None] - h[:, 6][None, :])
         cost_similarity = 1.0 - np.abs(h[:, 2][:, None] - h[:, 2][None, :])
-        adj = (
-            float(getattr(self.args, "GNN_Service_Weight", 1.0)) * same_service
-            + float(getattr(self.args, "GNN_Reliability_Weight", 0.45)) * reliability
-            + float(getattr(self.args, "GNN_Load_Weight", 0.35)) * load_similarity
-            + float(getattr(self.args, "GNN_Cost_Weight", 0.25)) * cost_similarity
-        )
+        adj = (float(getattr(self.args, "GNN_Service_Weight", 1.0)) * same_service
+               + float(getattr(self.args, "GNN_Reliability_Weight", 0.45)) * reliability
+               + float(getattr(self.args, "GNN_Load_Weight", 0.35)) * load_similarity
+               + float(getattr(self.args, "GNN_Cost_Weight", 0.25)) * cost_similarity)
         np.fill_diagonal(adj, 0.0)
         adj = adj / np.maximum(adj.sum(axis=1, keepdims=True), 1e-8)
-        self_w = float(getattr(self.args, "GNN_Self_Weight", 0.55))
-        neigh_w = float(getattr(self.args, "GNN_Neighbor_Weight", 0.45))
-        steps = int(getattr(self.args, "GNN_Message_Steps", 2))
+        self_w = float(getattr(self.args, "GNN_Self_Weight", 0.55)); neigh_w = float(getattr(self.args, "GNN_Neighbor_Weight", 0.45))
         request_gate = (self.oracleTypes == int(request_type)).astype(float)[:, None]
-        for _ in range(max(steps, 0)):
-            msg = adj.dot(h)
-            h = np.tanh(self_w * h + neigh_w * msg + 0.05 * request_gate)
+        for _ in range(max(int(getattr(self.args, "GNN_Message_Steps", 2)), 0)):
+            h = np.tanh(self_w * h + neigh_w * adj.dot(h) + 0.05 * request_gate)
         return np.clip(0.5 * (h + 1.0), 0.0, 1.0)
+
+    def getState(self, request_attrs, policy_name):
+        _, arrival_time, length, request_type, ddl = request_attrs
+        request_type = int(request_type)
+        if self.args.State_Mode == "original":
+            state = np.hstack(([request_type], self.oracle_events[policy_name][0] - float(arrival_time), self._effective_reputation_vector(policy_name)))
+            return np.nan_to_num(state.astype(float), nan=0.0, posinf=10.0, neginf=-10.0)
+        feats = self._base_oracle_features(request_attrs, policy_name)
+        if self._policy_uses_gnn(policy_name):
+            feats = self._graph_encode_oracles(feats, request_type)
+        mean_len = float(getattr(self.args, "Request_len_Mean", 6000)) / max(float(getattr(self.args, "Oracle_capacity", 1000)), 1e-8)
+        prefix = np.array([request_type / max(float(np.max(self.oracleTypes)), 1.0),
+                           float(length) / max(mean_len, 1e-8),
+                           float(ddl) / max(float(getattr(self.args, "Harder_Request_DDL", 6.6)), 1e-8)], dtype=float)
+        state = np.hstack((prefix, feats.reshape(-1)))
+        return np.nan_to_num(state.astype(float), nan=0.0, posinf=10.0, neginf=-10.0)
 
     def get_action_mask(self, request_attrs):
         if getattr(self.args, "Action_Mask_Mode", "none") != "type":
             return np.ones(self.oracleNum, dtype=bool)
-        mask = self.oracleTypes == int(request_attrs[3])
+        mask = (self.oracleTypes == int(request_attrs[3]))
         if not np.any(mask):
             mask[:] = True
+        # Avoid selecting severely cooled-down oracles as normal primary when possible.
         return mask.astype(bool)
 
     def get_backup_action_mask(self, request_attrs, primary_action):
@@ -338,25 +309,137 @@ class SchedulingEnv:
             mask[:] = True
         return mask.astype(bool)
 
+    def _estimated_oracle_metrics(self, request_attrs, policy_name):
+        _, arrival_time, length, _, ddl = request_attrs
+        wait = np.maximum(self.oracle_events[policy_name][0] - float(arrival_time), 0.0)
+        exe = float(length) / np.maximum(self.oracleAcc, 1e-8)
+        duration = wait + exe
+        rep = self._effective_reputation_vector(policy_name)
+        counts = self.reputation_factors[policy_name][0]
+        val = self.reputation_factors[policy_name][1]
+        observed_success = (val + 2.0 * rep) / np.maximum(counts + 2.0, 1e-8)
+        behavior = self.reputation_factors[policy_name][3] / np.maximum(counts, 1.0)
+        behavior_risk = np.clip(np.log1p(np.maximum(behavior, 0.0)) / np.log1p(100.0), 0.0, 1.0)
+        audit_risk = 1.0 - self.audit_truth_score(policy_name)
+        risk = np.clip(0.35 * (1.0 - rep) + 0.35 * (1.0 - observed_success) + 0.20 * behavior_risk + 0.10 * audit_risk, 0.0, 1.0)
+        ontime_prob = np.clip(1.0 - duration / max(float(ddl) * 1.5, 1e-8), 0.0, 1.0)
+        return duration, rep, observed_success, risk, ontime_prob
+
+    def get_hcrl_mode_state(self, request_attrs, policy_name):
+        base = self.getState(request_attrs, policy_name)
+        primary_scores = self._primary_score_vector(request_attrs, policy_name)
+        primary = int(np.argmax(primary_scores))
+        backup_scores = self._backup_score_vector(request_attrs, primary, policy_name)
+        valid_backup = self.get_backup_action_mask(request_attrs, primary)
+        best_backup_score = float(np.max(np.where(valid_backup, backup_scores, -1e9))) if np.any(valid_backup) else -1.0
+        duration, rep, obs, risk, ontime = self._estimated_oracle_metrics(request_attrs, policy_name)
+        primary_risk = float(risk[primary])
+        primary_ontime = float(ontime[primary])
+        deadline_slack = float((request_attrs[4] - duration[primary]) / max(request_attrs[4], 1e-8))
+        backup_gain = float(max(0.0, best_backup_score - primary_scores[primary]))
+        backup_cost = 0.0
+        if np.isfinite(best_backup_score) and np.any(valid_backup):
+            b = int(np.argmax(np.where(valid_backup, backup_scores, -1e9)))
+            backup_cost = float(self.oracleCost[b])
+        backup_cost_pressure = float(np.clip((self.oracleCost[primary] + backup_cost) / max(float(getattr(self.args, "HCRL_Cost_Budget", 1.0)), 1e-8), 0.0, 3.0) / 3.0)
+        start = max(0, int(request_attrs[0]) - 300)
+        if int(request_attrs[0]) > start:
+            recent_success = float(np.mean(self.events[policy_name][7, start:int(request_attrs[0])]))
+            recent_risk = float(np.mean(self.pb_records[policy_name][6, start:int(request_attrs[0])] + self.pb_records[policy_name][7, start:int(request_attrs[0])])) / 2.0
+            recent_audit_fail = float(np.mean(self.audit_records[policy_name][2, start:int(request_attrs[0])]))
+        else:
+            recent_success, recent_risk, recent_audit_fail = 0.5, 0.0, 0.0
+        best_backup_audit_score = 0.0
+        if np.any(valid_backup):
+            best_backup_audit_score = float(np.max(self.audit_truth_score(policy_name)[valid_backup]))
+        summary = np.array([
+            deadline_slack, primary_risk, primary_ontime, best_backup_score, backup_gain,
+            backup_cost_pressure, recent_success, recent_risk, recent_audit_fail,
+            best_backup_audit_score,
+        ], dtype=float)
+        return np.nan_to_num(np.hstack((base, summary)), nan=0.0, posinf=10.0, neginf=-10.0)
+
+    def _primary_score_vector(self, request_attrs, policy_name):
+        duration, rep, obs, risk, ontime = self._estimated_oracle_metrics(request_attrs, policy_name)
+        cost_norm = self.oracleCost / max(float(np.max(self.oracleCost)), 1e-8)
+        type_match = (self.oracleTypes == int(request_attrs[3])).astype(float)
+        score = 0.35 * rep + 0.25 * obs + 0.20 * ontime + 0.15 * type_match - 0.15 * cost_norm - 0.25 * risk
+        return np.nan_to_num(score, nan=-1e9)
+
+    def _backup_score_vector(self, request_attrs, primary_action, policy_name):
+        duration, rep, obs, risk, ontime = self._estimated_oracle_metrics(request_attrs, policy_name)
+        cost_norm = self.oracleCost / max(float(np.max(self.oracleCost)), 1e-8)
+        token_norm = self.oracleToken / max(float(np.max(self.oracleToken)), 1e-8)
+        score = (float(getattr(self.args, "PB_W_RECENT_SUCCESS", 0.42)) * obs
+                 + float(getattr(self.args, "PB_W_REPUTATION", 0.24)) * rep
+                 + float(getattr(self.args, "PB_W_TOKEN", 0.14)) * token_norm
+                 + 0.18 * ontime
+                 - float(getattr(self.args, "PB_W_COST", 0.10)) * cost_norm
+                 - float(getattr(self.args, "PB_W_BEHAVIOR_RISK", 0.20)) * risk)
+        score -= 0.08 * (self.oracleCost > float(getattr(self.args, "PB_Backup_Cost_Limit", 1.05)))
+        if 0 <= int(primary_action) < self.oracleNum:
+            score[int(primary_action)] = -1e9
+        return np.nan_to_num(score, nan=-1e9, posinf=1e9, neginf=-1e9)
+
+    def get_hcrl_mode_mask(self, request_attrs, policy_name, primary_action=None):
+        mode_names = list(getattr(self.args, "HCRL_Mode_Names", ["single_cost", "single_safe", "serial_safe", "parallel_fast", "parallel_safe"]))
+        mask = np.ones(len(mode_names), dtype=bool)
+        if primary_action is None:
+            primary_action = int(np.argmax(self._primary_score_vector(request_attrs, policy_name)))
+        backup_mask = self.get_backup_action_mask(request_attrs, primary_action)
+        has_backup = bool(np.any(backup_mask))
+        duration, rep, obs, risk, ontime = self._estimated_oracle_metrics(request_attrs, policy_name)
+        p_risk = float(risk[int(primary_action)])
+        p_duration = float(duration[int(primary_action)])
+        ddl = float(request_attrs[4])
+        cost_pressure = float(self.oracleCost[int(primary_action)] / max(float(getattr(self.args, "HCRL_Cost_Budget", 1.0)), 1e-8))
+        best_backup_score = -1e9
+        if has_backup:
+            best_backup_score = float(np.max(np.where(backup_mask, self._backup_score_vector(request_attrs, primary_action, policy_name), -1e9)))
+        low_truth = float(self.audit_truth_score(policy_name)[int(primary_action)]) < float(getattr(self.args, "Audit_Low_Truth_Threshold", 0.45))
+
+        def disable(name):
+            if name in mode_names:
+                mask[mode_names.index(name)] = False
+
+        if not has_backup or best_backup_score < float(getattr(self.args, "HCRL_Safety_Min_Backup_Score", 0.12)):
+            for n in ["serial_safe", "parallel_fast", "parallel_safe"]:
+                disable(n)
+        if (ddl - p_duration) / max(ddl, 1e-8) < 0.15:
+            disable("serial_safe")
+        if cost_pressure > 1.05:
+            disable("parallel_fast"); disable("parallel_safe")
+        if p_risk > float(getattr(self.args, "HCRL_Safety_Primary_Risk_Threshold", 0.52)) or low_truth:
+            disable("single_cost")
+        if low_truth and has_backup:
+            disable("single_safe")
+        if not np.any(mask):
+            # Always keep at least one safe fallback.
+            if "single_safe" in mode_names:
+                mask[mode_names.index("single_safe")] = True
+            else:
+                mask[:] = True
+        return mask.astype(bool)
+
     # ------------------------------------------------------------------
-    # Core simulation and feedback
+    # Simulation, audit and rewards
     # ------------------------------------------------------------------
     def _effective_validation_prob(self, action, policy_name):
         action = int(action)
         base = float(self.oracleValidationProbs[action])
-        if getattr(self.args, "Scenario", "static") not in ["rl_hard", "rl_harder"]:
-            return base
-        recent_assigned = float(self.reputation_factors[policy_name][0, action])
-        avg_recent = max(self.timeperiodSize / max(self.oracleNum, 1), 1e-8)
-        overload = max(0.0, recent_assigned / avg_recent - 1.0)
-        if getattr(self.args, "Scenario", "static") == "rl_harder":
-            fatigue_growth = np.sqrt(overload) + 0.35 * overload
-            min_prob = 0.02
-        else:
-            fatigue_growth = np.log1p(overload)
-            min_prob = 0.05
-        fatigue = float(getattr(self.args, "Fatigue_Strength", 1.0)) * float(self.oracleFatigueSensitivity[action]) * fatigue_growth
-        return float(np.clip(base - fatigue, min_prob, 0.99))
+        if getattr(self.args, "Scenario", "static") in ["rl_hard", "rl_harder"]:
+            recent = float(self.reputation_factors[policy_name][0, action])
+            avg_recent = max(self.timeperiodSize / max(self.oracleNum, 1), 1e-8)
+            overload = max(0.0, recent / avg_recent - 1.0)
+            fatigue_growth = np.sqrt(overload) + 0.35 * overload if getattr(self.args, "Scenario", "static") == "rl_harder" else np.log1p(overload)
+            min_prob = 0.02 if getattr(self.args, "Scenario", "static") == "rl_harder" else 0.05
+            fatigue = float(getattr(self.args, "Fatigue_Strength", 1.0)) * float(self.oracleFatigueSensitivity[action]) * fatigue_growth
+            base = float(np.clip(base - fatigue, min_prob, 0.99))
+        if getattr(self.args, "Use_Audit_Reputation", True):
+            # Audit posterior slightly calibrates the hidden validation probability.
+            truth = float(self.audit_truth_score(policy_name)[action])
+            base = float(np.clip(0.85 * base + 0.15 * truth, 0.01, 0.99))
+        return base
 
     def _simulate_oracle_attempt(self, request_attrs, action, policy_name, arrival_override=None):
         _, arrival_time, length, request_type, ddl = request_attrs
@@ -366,7 +449,7 @@ class SchedulingEnv:
         cost = float(self.oracleCost[action])
         oracle_type = int(self.oracleTypes[action])
         idleT = float(self.oracle_events[policy_name][0, action])
-        reputation = float(self.oracle_events[policy_name][2, action])
+        reputation = float(self._effective_reputation_vector(policy_name)[action])
         exeT = float(length) / acc
         waitT = max(idleT - effective_arrival, 0.0)
         startT = effective_arrival + waitT
@@ -380,105 +463,132 @@ class SchedulingEnv:
         probs = np.asarray(self.oracleBehaviorProbs[action], dtype=float)
         probs = probs / max(float(probs.sum()), 1e-8)
         behavior_record = float(np.random.choice([0, 1, 5, 100], p=probs))
-        return {
-            "action": action,
-            "startT": startT,
-            "waitT": waitT,
-            "exeT": exeT,
-            "durationT": durationT,
-            "leaveT": leaveT,
-            "cost": cost,
-            "reputation": reputation,
-            "match": match,
-            "validation_raw": validation_raw,
-            "behavior_record": behavior_record,
-            "oracle_type": oracle_type,
-            "is_malicious": 1 if action in self.malicious_oracles else 0,
-            "is_trusted": 1 if action in self.trusted_oracles else 0,
-        }
+        return {"action": action, "startT": startT, "waitT": waitT, "exeT": exeT,
+                "durationT": durationT, "leaveT": leaveT, "cost": cost, "reputation": reputation,
+                "match": match, "validation_raw": validation_raw, "behavior_record": behavior_record,
+                "oracle_type": oracle_type, "is_malicious": 1 if action in self.malicious_oracles else 0,
+                "is_trusted": 1 if action in self.trusted_oracles else 0}
 
     def _is_success(self, attempt, ddl):
         if getattr(self.args, "Success_Mode", "original") == "validation_aware":
             return int(attempt["durationT"] <= ddl and attempt["match"] == 1 and attempt["validation_raw"] == 1)
         return int(attempt["durationT"] <= ddl and attempt["match"] == 1)
 
+    def _audit_severity(self, attempt, ddl):
+        severity = 0.0
+        if attempt["durationT"] > ddl: severity += 0.5
+        if attempt["match"] == 0: severity += 0.5
+        if attempt["validation_raw"] == 0: severity += 1.0
+        if attempt["behavior_record"] >= 5: severity += 0.5
+        if attempt["behavior_record"] >= 100: severity += 1.0
+        if attempt["is_malicious"] == 1: severity += 0.5
+        return float(np.clip(severity, 0.5, 2.5))
+
+    def compute_audit_risk(self, oracle_id, policy_name):
+        i = int(oracle_id)
+        rep = float(self._effective_reputation_vector(policy_name)[i])
+        truth = float(self.audit_truth_score(policy_name)[i])
+        cooldown = float(self._audit_cooldown_fraction(policy_name)[i])
+        counts = self.reputation_factors[policy_name][0, i]
+        val = self.reputation_factors[policy_name][1, i]
+        recent_fail = 1.0 - float((val + 1.0) / max(counts + 2.0, 1.0))
+        since_last = self.global_step - self.audit_last_step[policy_name][i] if self.audit_last_step[policy_name][i] >= 0 else self.global_step
+        staleness = np.clip(since_last / max(self.requestNum * 0.20, 1.0), 0.0, 1.0)
+        return float(np.clip(0.25 * (1 - rep) + 0.25 * (1 - truth) + 0.25 * recent_fail + 0.15 * cooldown + 0.10 * staleness, 0.0, 1.0))
+
+    def maybe_trigger_audit(self, request_attrs, attempt, policy_name):
+        if not getattr(self.args, "Use_Audit_Reputation", True):
+            return False, True, 0.0
+        request_id = int(request_attrs[0]); ddl = float(request_attrs[4]); i = int(attempt["action"])
+        risk = self.compute_audit_risk(i, policy_name)
+        p = float(getattr(self.args, "Audit_Base_Rate", 0.03)) + float(getattr(self.args, "Audit_Risk_Rate", 0.10)) * risk
+        p = float(np.clip(p, 0.0, 0.75))
+        if np.random.rand() > p:
+            return False, True, 0.0
+        audit_pass = bool(attempt["validation_raw"] == 1 and attempt["match"] == 1 and attempt["behavior_record"] < 5 and attempt["durationT"] <= ddl * 1.15)
+        severity = 0.0 if audit_pass else self._audit_severity(attempt, ddl)
+        self.update_audit_reputation(i, audit_pass, severity, policy_name)
+        self.audit_records[policy_name][0, request_id] = 1.0
+        self.audit_records[policy_name][1, request_id] = 1.0 if audit_pass else 0.0
+        self.audit_records[policy_name][2, request_id] = 0.0 if audit_pass else 1.0
+        self.audit_records[policy_name][3, request_id] = self.audit_truth_score(policy_name)[i]
+        return True, audit_pass, severity
+
+    def update_audit_reputation(self, oracle_id, audit_pass, severity, policy_name):
+        i = int(oracle_id)
+        self.audit_last_step[policy_name][i] = self.global_step
+        if audit_pass:
+            self.audit_alpha[policy_name][i] += 1.0
+            self.audit_clean_streak[policy_name][i] += 1.0
+            self.audit_pass_count[policy_name][i] += 1.0
+            self.audit_cooldown[policy_name][i] = max(0.0, self.audit_cooldown[policy_name][i] - 1.0)
+            if self.audit_clean_streak[policy_name][i] >= int(getattr(self.args, "Audit_Min_Clean_Streak", 3)):
+                recover = float(getattr(self.args, "Audit_Pass_Recovery", 0.03))
+                self.oracle_events[policy_name][2, i] += recover * (1.0 - self.oracle_events[policy_name][2, i])
+        else:
+            sev = float(max(severity, 0.5))
+            self.audit_beta[policy_name][i] += sev
+            self.audit_clean_streak[policy_name][i] = 0.0
+            self.audit_fail_count[policy_name][i] += 1.0
+            self.oracle_events[policy_name][2, i] -= float(getattr(self.args, "Audit_Fail_Penalty", 0.08)) * sev
+            if sev >= 1.5:
+                self.audit_cooldown[policy_name][i] = float(getattr(self.args, "Audit_Cooldown_Steps", 300))
+        self.oracle_events[policy_name][2, i] = float(np.clip(self.oracle_events[policy_name][2, i], 0.0, 1.0))
+
+    def _tick_audit_cooldowns(self):
+        for name in self.policy_names:
+            self.audit_cooldown[name] = np.maximum(self.audit_cooldown[name] - 1.0, 0.0)
+
     def _original_reward(self, exeT, durationT, cost, reputation, request_type, oracle_type):
         penalty = 0 if int(request_type) == int(oracle_type) else 1
-        return float((1 + 2.5 * np.exp(1.5 - float(cost))) *
-                     (float(exeT) / max(float(durationT), 1e-8)) + float(reputation) - 4 * penalty)
+        return float((1 + 2.5 * np.exp(1.5 - float(cost))) * (float(exeT) / max(float(durationT), 1e-8)) + float(reputation) - 4 * penalty)
 
-    def _risk_aware_reward(self, reputation, match, successful_validation, cost, durationT, ddl, behavior_record):
+    def _risk_aware_reward(self, reputation, match, successful_validation, cost, durationT, ddl, behavior_record, audit_risk=0.0):
         ddl = max(float(ddl), 1e-8)
         timeout = 1.0 if float(durationT) > ddl else 0.0
         on_time = 1.0 - timeout
-        rep_score = 0.5 * (np.tanh(float(reputation)) + 1.0)
-        match_score = float(match)
-        val_score = float(successful_validation)
+        rep_score = float(np.clip(reputation, 0.0, 1.0))
+        match_score = float(match); val_score = float(successful_validation)
         task_success = match_score * val_score * on_time
         cost_score = float(np.clip(float(cost), 0.0, 1.25) / 1.25)
         response_ratio = float(np.clip(float(durationT) / ddl, 0.0, 2.5))
         response_penalty = float(np.clip(min(response_ratio, 1.0) * 0.4 + max(response_ratio - 1.0, 0.0) * 0.9, 0.0, 1.0))
         behavior_risk = float(np.log1p(max(float(behavior_record), 0.0)) / np.log1p(100.0))
         a = self.args
-        positive = (
-            a.W_SUCCESS * task_success
-            + a.W_VALIDATION * val_score
-            + a.W_MATCH * match_score
-            + a.W_REPUTATION * rep_score
-        )
-        negative = (
-            a.W_COST * cost_score
-            + a.W_RESPONSE * response_penalty
-            + a.W_BEHAVIOR * behavior_risk
-            + a.W_TIMEOUT * timeout
-            + 0.8 * (1.0 - task_success)
-        )
-        normalizer = (
-            a.W_SUCCESS + a.W_VALIDATION + a.W_MATCH + a.W_REPUTATION
-            + a.W_COST + a.W_RESPONSE + a.W_BEHAVIOR + a.W_TIMEOUT + 0.8
-        )
-        return float(np.clip(a.Reward_Scale * (positive - negative) / max(normalizer, 1e-8),
-                             -a.Reward_Clip, a.Reward_Clip))
+        positive = a.W_SUCCESS * task_success + a.W_VALIDATION * val_score + a.W_MATCH * match_score + a.W_REPUTATION * rep_score
+        negative = (a.W_COST * cost_score + a.W_RESPONSE * response_penalty + a.W_BEHAVIOR * behavior_risk
+                    + a.W_TIMEOUT * timeout + 0.8 * (1.0 - task_success)
+                    + float(getattr(a, "Audit_Risk_Reward_Penalty", 0.30)) * float(audit_risk))
+        normalizer = a.W_SUCCESS + a.W_VALIDATION + a.W_MATCH + a.W_REPUTATION + a.W_COST + a.W_RESPONSE + a.W_BEHAVIOR + a.W_TIMEOUT + 0.8 + float(getattr(a, "Audit_Risk_Reward_Penalty", 0.30))
+        return float(np.clip(a.Reward_Scale * (positive - negative) / max(normalizer, 1e-8), -a.Reward_Clip, a.Reward_Clip))
 
-    def _reward_for_attempt(self, attempt, request_attrs, final_success=None,
-                            total_cost=None, final_duration=None,
-                            combined_behavior=None, combined_rep=None):
+    def _reward_for_attempt(self, attempt, request_attrs, final_success=None, total_cost=None, final_duration=None, combined_behavior=None, combined_rep=None, audit_risk=None):
         _, _, _, request_type, ddl = request_attrs
+        if audit_risk is None:
+            audit_risk = 1.0 - float(self.audit_truth_score("HCRL-Oracle")[attempt["action"]]) if "HCRL-Oracle" in self.policy_names else 0.0
         if getattr(self.args, "Reward_Mode", "original") == "risk_aware":
-            return self._risk_aware_reward(
-                combined_rep if combined_rep is not None else attempt["reputation"],
-                attempt["match"],
-                final_success if final_success is not None else attempt["validation_raw"],
-                total_cost if total_cost is not None else attempt["cost"],
-                final_duration if final_duration is not None else attempt["durationT"],
-                ddl,
-                combined_behavior if combined_behavior is not None else attempt["behavior_record"],
-            )
-        return self._original_reward(
-            attempt["exeT"],
-            final_duration if final_duration is not None else attempt["durationT"],
-            total_cost if total_cost is not None else attempt["cost"],
-            attempt["reputation"],
-            request_type,
-            attempt["oracle_type"],
-        )
+            return self._risk_aware_reward(combined_rep if combined_rep is not None else attempt["reputation"],
+                                           attempt["match"], final_success if final_success is not None else attempt["validation_raw"],
+                                           total_cost if total_cost is not None else attempt["cost"],
+                                           final_duration if final_duration is not None else attempt["durationT"], ddl,
+                                           combined_behavior if combined_behavior is not None else attempt["behavior_record"], audit_risk=audit_risk)
+        return self._original_reward(attempt["exeT"], final_duration if final_duration is not None else attempt["durationT"],
+                                     total_cost if total_cost is not None else attempt["cost"], attempt["reputation"], request_type, attempt["oracle_type"])
 
     def _record_attempt_updates(self, policy_name, attempts):
-        for attempt in attempts:
-            if attempt is None:
-                continue
-            a = int(attempt["action"])
-            self.oracle_events[policy_name][1, a] += 1
-            self.oracle_events[policy_name][0, a] = max(self.oracle_events[policy_name][0, a], attempt["leaveT"])
-            self.oracle_events[policy_name][3, a] += attempt["match"]
-            self.oracle_events[policy_name][4, a] += attempt["validation_raw"]
-            self.reputation_factors[policy_name][0, a] += 1
-            self.reputation_factors[policy_name][1, a] += attempt["validation_raw"]
-            self.reputation_factors[policy_name][2, a] += attempt["durationT"]
-            self.reputation_factors[policy_name][3, a] += attempt["behavior_record"]
+        for att in attempts:
+            if att is None: continue
+            i = int(att["action"])
+            self.oracle_events[policy_name][1, i] += 1
+            self.oracle_events[policy_name][0, i] = max(self.oracle_events[policy_name][0, i], att["leaveT"])
+            self.oracle_events[policy_name][3, i] += att["match"]
+            self.oracle_events[policy_name][4, i] += att["validation_raw"]
+            self.reputation_factors[policy_name][0, i] += 1
+            self.reputation_factors[policy_name][1, i] += att["validation_raw"]
+            self.reputation_factors[policy_name][2, i] += att["durationT"]
+            self.reputation_factors[policy_name][3, i] += att["behavior_record"]
 
-    def _record_request(self, policy_name, request_id, primary, reward, success,
-                        final_duration, final_leaveT, total_cost, match):
+    def _record_request(self, policy_name, request_id, primary, reward, success, final_duration, final_leaveT, total_cost, match):
         self.events[policy_name][0, request_id] = primary["action"]
         self.events[policy_name][1, request_id] = primary["startT"]
         self.events[policy_name][2, request_id] = primary["waitT"]
@@ -489,1286 +599,301 @@ class SchedulingEnv:
         self.events[policy_name][7, request_id] = success
         self.events[policy_name][8, request_id] = total_cost
         self.events[policy_name][9, request_id] = match
-        # On-time completion is different from final task success.
-        # success_rate uses row 7; success_time_rate uses row 10.
         self.events[policy_name][10, request_id] = 1.0 if float(final_duration) <= float(self.ddl) else 0.0
 
     def feedback(self, request_attrs, action, policy_name):
-        request_id, _, _, _, ddl = request_attrs
-        request_id = int(request_id)
+        self.global_step += 1
+        self._tick_audit_cooldowns()
+        rid, _, _, _, ddl = request_attrs; rid = int(rid)
         attempt = self._simulate_oracle_attempt(request_attrs, action, policy_name)
         success = self._is_success(attempt, float(ddl))
-        reward = self._reward_for_attempt(attempt, request_attrs, final_success=success)
+        audit_risk = 1.0 - float(self.audit_truth_score(policy_name)[int(action)])
+        reward = self._reward_for_attempt(attempt, request_attrs, final_success=success, audit_risk=audit_risk)
         self._record_attempt_updates(policy_name, [attempt])
-        self._record_request(policy_name, request_id, attempt, reward, success,
-                             attempt["durationT"], attempt["leaveT"], attempt["cost"], attempt["match"])
-        self.pb_records[policy_name][0, request_id] = success
-        self.pb_records[policy_name][4, request_id] = int(action)
-        self.pb_records[policy_name][6, request_id] = attempt["is_malicious"]
-        self.pb_records[policy_name][8, request_id] = attempt["is_trusted"]
+        self.maybe_trigger_audit(request_attrs, attempt, policy_name)
+        self._record_request(policy_name, rid, attempt, reward, success, attempt["durationT"], attempt["leaveT"], attempt["cost"], attempt["match"])
+        self.pb_records[policy_name][0, rid] = success
+        self.pb_records[policy_name][4, rid] = int(action)
+        self.pb_records[policy_name][6, rid] = attempt["is_malicious"]
+        self.pb_records[policy_name][8, rid] = attempt["is_trusted"]
         return reward
 
     # ------------------------------------------------------------------
-    # Primary-backup / COBRA helpers
+    # Primary-backup / HCRL feedback
     # ------------------------------------------------------------------
-    def _backup_score_vector(self, request_attrs, primary_action, policy_name):
-        _, arrival_time, length, _, ddl = request_attrs
-        counts = self.reputation_factors[policy_name][0]
-        val = self.reputation_factors[policy_name][1]
-        behavior_sum = self.reputation_factors[policy_name][3]
-        rep = np.clip(self.oracle_events[policy_name][2], 0.0, 1.0)
-        token_norm = np.clip(self.oracleToken / max(float(np.max(self.oracleToken)), 1e-8), 0.0, 1.0)
-        prior = 0.5 * rep + 0.5 * token_norm
-        alpha = float(getattr(self.args, "PB_Prior_Strength", 2.0))
-        recent_success = (val + alpha * prior) / np.maximum(counts + alpha, 1e-8)
-        recent_load = counts / max(float(self.timeperiodSize), 1.0)
-        cost_norm = np.clip(self.oracleCost / max(float(np.max(self.oracleCost)), 1e-8), 0.0, 1.0)
-        avg_behavior = behavior_sum / np.maximum(counts, 1.0)
-        behavior_risk = np.clip(np.log1p(np.maximum(avg_behavior, 0.0)) / np.log1p(100.0), 0.0, 1.0)
-        estimated_wait = np.maximum(self.oracle_events[policy_name][0] - float(arrival_time), 0.0)
-        estimated_exe = float(length) / np.maximum(self.oracleAcc, 1e-8)
-        delay_penalty = np.clip((estimated_wait + estimated_exe) / max(float(ddl), 1e-8), 0.0, 2.0) / 2.0
-        score = (
-            self.args.PB_W_RECENT_SUCCESS * recent_success
-            + self.args.PB_W_REPUTATION * rep
-            + self.args.PB_W_TOKEN * token_norm
-            - self.args.PB_W_LOAD * recent_load
-            - self.args.PB_W_COST * cost_norm
-            - self.args.PB_W_BEHAVIOR_RISK * behavior_risk
-            - self.args.PB_W_DELAY * delay_penalty
-        )
-        score -= 0.08 * (self.oracleCost > float(getattr(self.args, "PB_Backup_Cost_Limit", 1.05)))
-        if 0 <= int(primary_action) < self.oracleNum:
-            score[int(primary_action)] = -1e9
-        return np.nan_to_num(score, nan=-1e9, posinf=1e9, neginf=-1e9)
-
     def choose_backup_oracle(self, request_attrs, primary_action, policy_name):
         candidates = np.where(self.get_backup_action_mask(request_attrs, primary_action))[0]
         if candidates.size == 0:
             return int(primary_action)
-        random_flag = False
-        if policy_name == "COBRA-Oracle":
-            random_flag = bool(getattr(self.args, "COBRA_Random_Backup", False))
-        elif policy_name == "HCRL-Oracle":
-            random_flag = bool(getattr(self.args, "HCRL_Random_Backup", False))
+        random_flag = (policy_name == "COBRA-Oracle" and bool(getattr(self.args, "COBRA_Random_Backup", False))) or (policy_name == "HCRL-Oracle" and bool(getattr(self.args, "HCRL_Random_Backup", False)))
         if random_flag:
             return int(np.random.choice(candidates))
         score = self._backup_score_vector(request_attrs, primary_action, policy_name)
         return int(candidates[np.argmax(score[candidates])])
 
-    def _hcrl_oracle_observed_success(self, policy_name, action):
-        """Smoothed observed validation success used by HCRL risk estimates.
-
-        This deliberately avoids using the hidden true validation probability.
-        It is based only on reputation factors accumulated by the current policy.
-        """
-        a = int(action)
-        counts = self.reputation_factors[policy_name][0, a]
-        val = self.reputation_factors[policy_name][1, a]
-        rep = float(np.clip(self.oracle_events[policy_name][2, a], 0.0, 1.0))
-        token_norm = float(np.clip(self.oracleToken[a] / max(float(np.max(self.oracleToken)), 1e-8), 0.0, 1.0))
-        prior = 0.55 * rep + 0.45 * token_norm
-        return float((val + 2.0 * prior) / max(counts + 2.0, 1e-8))
-
-    def _hcrl_trust_proxy(self, policy_name, action):
-        """Trust proxy available to the policy: reputation + observed success + token stake."""
-        a = int(action)
-        rep = float(np.clip(self.oracle_events[policy_name][2, a], 0.0, 1.0))
-        token_norm = float(np.clip(self.oracleToken[a] / max(float(np.max(self.oracleToken)), 1e-8), 0.0, 1.0))
-        hist_success = self._hcrl_oracle_observed_success(policy_name, a)
-        return float(np.clip(0.42 * hist_success + 0.35 * rep + 0.23 * token_norm, 0.0, 1.0))
-
-    def _hcrl_oracle_risk_estimate(self, request_attrs, action, policy_name):
-        """Risk estimate for a candidate oracle without using hidden labels.
-
-        HCRL-v2 improved success but tended to call more oracles and touched more
-        malicious oracles in absolute count.  This v3 estimate uses only observable
-        proxies (historical success, reputation, stake, behavior history, load,
-        delay pressure, and low-cost bait pattern) to make recovery risk-budgeted.
-        """
-        _, arrival_time, length, request_type, ddl = request_attrs
-        a = int(action)
-        if a < 0 or a >= self.oracleNum:
-            return 1.0
-
-        counts = self.reputation_factors[policy_name][0, a]
-        rep = float(np.clip(self.oracle_events[policy_name][2, a], 0.0, 1.0))
-        token_norm = float(np.clip(self.oracleToken[a] / max(float(np.max(self.oracleToken)), 1e-8), 0.0, 1.0))
-        hist_success = self._hcrl_oracle_observed_success(policy_name, a)
-        trust = float(np.clip(0.42 * hist_success + 0.35 * rep + 0.23 * token_norm, 0.0, 1.0))
-        trust_deficit = 1.0 - trust
-
-        behavior = self.reputation_factors[policy_name][3, a] / max(counts, 1.0)
-        behavior_risk = float(np.clip(np.log1p(max(behavior, 0.0)) / np.log1p(100.0), 0.0, 1.0))
-        wait = max(float(self.oracle_events[policy_name][0, a]) - float(arrival_time), 0.0)
-        exe = float(length) / max(float(self.oracleAcc[a]), 1e-8)
-        delay_ratio = float(np.clip((wait + exe) / max(float(ddl), 1e-8), 0.0, 2.0))
-        delay_risk = max(0.0, delay_ratio - 0.72) / 1.28
-        type_mismatch = 0.0 if int(self.oracleTypes[a]) == int(request_type) else 1.0
-        fatigue = float(np.clip(self.oracleFatigueSensitivity[a], 0.0, 1.0))
-        cost_norm = float(np.clip(self.oracleCost[a] / max(float(np.max(self.oracleCost)), 1e-8), 0.0, 1.0))
-
-        # Low-cost + low-stake + weak history is a bait-like pattern in rl_harder.
-        bait_risk = float(np.clip((0.34 - cost_norm) / 0.34, 0.0, 1.0)) * float(np.clip(1.0 - token_norm, 0.0, 1.0))
-        if hist_success >= 0.72:
-            bait_risk *= 0.35
-
-        risk = (
-            0.40 * trust_deficit
-            + 0.18 * behavior_risk
-            + 0.14 * delay_risk
-            + 0.10 * fatigue
-            + 0.24 * bait_risk
-            + 0.50 * type_mismatch
-        )
-        return float(np.clip(risk, 0.0, 1.0))
-
-    def _hcrl_primary_risk_estimate(self, request_attrs, primary_action, policy_name):
-        """Backward-compatible wrapper for primary oracle risk."""
-        return self._hcrl_oracle_risk_estimate(request_attrs, primary_action, policy_name)
-
-    def _hcrl_recent_backup_used_rate(self, policy_name, request_id=None):
-        """Recent HCRL backup usage rate used by the balanced recovery gate."""
-        if request_id is None:
-            return 0.0
-        try:
-            rid = int(request_id)
-        except Exception:
-            return 0.0
-        if policy_name not in self.pb_records or rid <= 0:
-            return 0.0
-        window = int(getattr(self.args, "HCRL_Backup_Rate_Window", 600))
-        start = max(0, rid - max(window, 1))
-        values = self.pb_records[policy_name][1, start:rid]
-        if values.size == 0:
-            return 0.0
-        return float(np.mean(values))
-
-    def _hcrl_recent_primary_success_rate(self, policy_name, request_id=None):
-        """Recent primary success used to adapt the recovery target.
-
-        If the primary selector is still not strong enough, HCRL-v5 deliberately
-        keeps a higher recovery target. This avoids the v3 failure mode where
-        a moderately good primary policy made the gate overconfident and shut
-        recovery down too early.
-        """
-        if request_id is None:
-            return 0.0
-        try:
-            rid = int(request_id)
-        except Exception:
-            return 0.0
-        if policy_name not in self.pb_records or rid <= 0:
-            return 0.0
-        window = int(getattr(self.args, "HCRL_Backup_Rate_Window", 600))
-        start = max(0, rid - max(window, 1))
-        values = self.pb_records[policy_name][0, start:rid]
-        if values.size == 0:
-            return 0.0
-        return float(np.mean(values))
-
-    def _hcrl_recent_final_success_rate(self, policy_name, request_id=None):
-        """Recent final success used by the reliability-targeted recovery gate."""
-        if request_id is None:
-            return 0.0
-        try:
-            rid = int(request_id)
-        except Exception:
-            return 0.0
-        if policy_name not in self.events or rid <= 0:
-            return 0.0
-        window = int(getattr(self.args, "HCRL_Backup_Rate_Window", 600))
-        start = max(0, rid - max(window, 1))
-        values = self.events[policy_name][7, start:rid]
-        if values.size == 0:
-            return 0.0
-        return float(np.mean(values))
-
-    def _hcrl_dynamic_recovery_targets(self, policy_name, request_id=None):
-        """Return dynamic (target_min, target_max) for backup/recovery usage.
-
-        v4 fixed the v3 collapse by enforcing a moderate backup band, but its
-        fixed band can still be suboptimal: when primary success is below the
-        desired reliability level, HCRL should keep more recovery capacity; when
-        the system is already reliable, it should avoid unnecessary parallel cost.
-        """
-        base_min = float(getattr(self.args, "HCRL_Target_Backup_Min", 0.24))
-        base_max = float(getattr(self.args, "HCRL_Target_Backup_Max", 0.44))
-        if getattr(self.args, "HCRL_No_Dynamic_Recovery_Target", False):
-            return base_min, max(base_max, base_min + 0.04)
-
-        primary_rate = self._hcrl_recent_primary_success_rate(policy_name, request_id)
-        final_rate = self._hcrl_recent_final_success_rate(policy_name, request_id)
-        primary_target = float(getattr(self.args, "HCRL_Primary_Success_Target", 0.70))
-        final_target = float(getattr(self.args, "HCRL_Final_Success_Target", 0.84))
-        primary_deficit = max(0.0, primary_target - primary_rate)
-        final_deficit = max(0.0, final_target - final_rate)
-        boost = (
-            float(getattr(self.args, "HCRL_Primary_Deficit_Target_Boost", 0.35)) * primary_deficit
-            + float(getattr(self.args, "HCRL_Final_Deficit_Target_Boost", 0.25)) * final_deficit
-        )
-        cap = float(getattr(self.args, "HCRL_Target_Backup_Cap", 0.54))
-        target_min = float(np.clip(base_min + boost, 0.02, cap - 0.04))
-        target_max = float(np.clip(base_max + boost, target_min + 0.04, cap))
-        return target_min, target_max
-
-    def _hcrl_recovery_need_score(self, request_attrs, primary_action, primary_success,
-                                  backup_action, backup_score, policy_name, request_id=None):
-        """Compute a smooth recovery-need score instead of a hard v3 risk filter.
-
-        v3 failed in long runs because the risk-budgeted gate became too conservative:
-        as the primary selector improved, backup usage collapsed and HCRL lost its
-        recovery advantage. This v4 score keeps recovery alive only when useful by
-        combining primary failure, observable risk, backup safety, remaining cost,
-        and a soft target backup-rate floor.
-        """
-        if int(backup_action) < 0 or int(backup_action) == int(primary_action):
-            return 0.0, self._hcrl_primary_risk_estimate(request_attrs, primary_action, policy_name), 1.0
-
-        primary_risk = self._hcrl_oracle_risk_estimate(request_attrs, primary_action, policy_name)
-        backup_risk = self._hcrl_oracle_risk_estimate(request_attrs, backup_action, policy_name)
-        primary_trust = self._hcrl_trust_proxy(policy_name, primary_action)
-        backup_trust = self._hcrl_trust_proxy(policy_name, backup_action)
-        recent_backup_rate = self._hcrl_recent_backup_used_rate(policy_name, request_id)
-        target_min, target_max = self._hcrl_dynamic_recovery_targets(policy_name, request_id)
-        recent_final_rate = self._hcrl_recent_final_success_rate(policy_name, request_id)
-
-        primary_cost = float(self.oracleCost[int(primary_action)]) if 0 <= int(primary_action) < self.oracleNum else 0.0
-        backup_cost = float(self.oracleCost[int(backup_action)]) if 0 <= int(backup_action) < self.oracleNum else 0.0
-        effective_cost = primary_cost + float(getattr(self.args, "HCRL_Parallel_Cost_Discount", 0.85)) * backup_cost
-        hard_cap = float(getattr(self.args, "HCRL_Recovery_Cost_Hard_Cap", 1.55))
-        cost_over = max(0.0, effective_cost - hard_cap) / max(hard_cap, 1e-8)
-
-        # Positive signals for recovery.
-        failure_need = 1.0 if int(primary_success) == 0 else 0.0
-        risk_need = max(0.0, primary_risk - float(getattr(self.args, "HCRL_Safety_Primary_Risk_Threshold", 0.46)))
-        backup_advantage = max(0.0, primary_risk - backup_risk)
-        trust_gain = max(0.0, backup_trust - primary_trust)
-        score_signal = max(0.0, float(backup_score) - float(getattr(self.args, "HCRL_Safety_Min_Backup_Score", 0.04)))
-        final_success_floor = max(0.0, float(getattr(self.args, "HCRL_Final_Success_Target", 0.84)) - recent_final_rate)
-        high_trust_backup = max(0.0, backup_trust - float(getattr(self.args, "HCRL_High_Trust_Threshold", 0.64)))
-
-        # Floor signal prevents late-stage collapse to primary-only behavior.
-        # It is active only below the lower target; above the upper target it becomes a penalty.
-        floor_signal = max(0.0, target_min - recent_backup_rate) / max(target_min, 1e-8)
-        overuse_signal = max(0.0, recent_backup_rate - target_max) / max(1.0 - target_max, 1e-8)
-
-        need_score = (
-            float(getattr(self.args, "HCRL_Failure_Need_Weight", 0.70)) * failure_need
-            + float(getattr(self.args, "HCRL_Risk_Need_Weight", 0.45)) * risk_need
-            + float(getattr(self.args, "HCRL_Backup_Advantage_Weight", 0.35)) * backup_advantage
-            + float(getattr(self.args, "HCRL_Backup_Trust_Gain_Weight", 0.18)) * trust_gain
-            + float(getattr(self.args, "HCRL_Backup_Score_Weight", 0.20)) * score_signal
-            + float(getattr(self.args, "HCRL_Final_Success_Floor_Weight", 0.30)) * final_success_floor
-            + float(getattr(self.args, "HCRL_High_Trust_Backup_Weight", 0.18)) * high_trust_backup
-            + float(getattr(self.args, "HCRL_Backup_Floor_Weight", 0.22)) * floor_signal
-            - float(getattr(self.args, "HCRL_Backup_Overuse_Weight", 0.30)) * overuse_signal
-            - float(getattr(self.args, "HCRL_Recovery_Cost_Weight", 0.45)) * cost_over
-        )
-        return float(need_score), float(primary_risk), float(backup_risk)
-
-
-    def _hcrl_success_probability_estimate(self, request_attrs, action, policy_name):
-        """Observable probability estimate for counterfactual recovery.
-
-        This is not a ground-truth validation probability. It combines observable
-        trust, historical validation success, reputation, type match, deadline
-        feasibility and behavior risk into a calibrated proxy. HCRL-v6 uses this
-        estimate to compare the counterfactual value of primary-only execution
-        against serial/parallel recovery before spending a backup oracle.
-        """
-        _, arrival_time, length, request_type, ddl = request_attrs
-        a = int(action)
-        if a < 0 or a >= self.oracleNum:
-            return 0.0
-        trust = self._hcrl_trust_proxy(policy_name, a)
-        hist = self._hcrl_oracle_observed_success(policy_name, a)
-        rep = float(np.clip(self.oracle_events[policy_name][2, a], 0.0, 1.0))
-        match = 1.0 if int(self.oracleTypes[a]) == int(request_type) else 0.0
-        wait = max(float(self.oracle_events[policy_name][0, a]) - float(arrival_time), 0.0)
-        exe = float(length) / max(float(self.oracleAcc[a]), 1e-8)
-        deadline_margin = (float(ddl) - wait - exe) / max(float(ddl), 1e-8)
-        time_feasible = float(1.0 / (1.0 + np.exp(-5.0 * deadline_margin)))
-        risk = self._hcrl_oracle_risk_estimate(request_attrs, a, policy_name)
-        p = (
-            0.42 * hist
-            + 0.24 * trust
-            + 0.14 * rep
-            + 0.20 * time_feasible
-        ) * match * (1.0 - 0.55 * risk)
-        return float(np.clip(p, 0.01, 0.99))
-
-    def _hcrl_counterfactual_recovery_advantage(self, request_attrs, primary_action,
-                                                backup_action, policy_name, request_id=None,
-                                                mode="parallel"):
-        """Expected marginal utility of recovery over primary-only execution.
-
-        HCRL-v6 estimates the counterfactual utility difference
-        U(recovery) - U(primary only). Recovery is favoured only when its
-        expected success gain justifies additional cost, latency, risk, and
-        current recovery overuse.
-        """
-        _, _, length, _, ddl = request_attrs
-        if int(backup_action) < 0 or int(backup_action) == int(primary_action):
-            return {"advantage": -1.0, "success_gain": 0.0, "p_primary": 0.0,
-                    "p_recovery": 0.0, "risk_delta": 1.0, "cost_extra": 1.0}
-
-        p_primary = self._hcrl_success_probability_estimate(request_attrs, primary_action, policy_name)
-        p_backup = self._hcrl_success_probability_estimate(request_attrs, backup_action, policy_name)
-        primary_risk = self._hcrl_oracle_risk_estimate(request_attrs, primary_action, policy_name)
-        backup_risk = self._hcrl_oracle_risk_estimate(request_attrs, backup_action, policy_name)
-        backup_cost = float(self.oracleCost[int(backup_action)])
-        discount = float(getattr(self.args, "HCRL_Parallel_Cost_Discount", 0.85))
-
-        remaining = float(ddl) - float(length) / max(float(self.oracleAcc[int(primary_action)]), 1e-8)
-        backup_exe = float(length) / max(float(self.oracleAcc[int(backup_action)]), 1e-8)
-        serial_feasible = 1.0 if remaining > 0 and backup_exe <= remaining else 0.0
-        p_serial = p_primary + (1.0 - p_primary) * p_backup * serial_feasible
-        p_parallel = 1.0 - (1.0 - p_primary) * (1.0 - p_backup)
-
-        if str(mode) == "serial":
-            p_recovery = p_serial
-            cost_extra = backup_cost
-            latency_extra = max(0.0, backup_exe - max(remaining, 0.0)) / max(float(ddl), 1e-8)
-        else:
-            p_recovery = p_parallel
-            cost_extra = discount * backup_cost
-            latency_extra = 0.08
-
-        success_gain = max(0.0, p_recovery - p_primary)
-        trust_gain = max(0.0, self._hcrl_trust_proxy(policy_name, backup_action) - self._hcrl_trust_proxy(policy_name, primary_action))
-        risk_delta = max(0.0, backup_risk - primary_risk)
-        recent_backup_rate = self._hcrl_recent_backup_used_rate(policy_name, request_id)
-        target_min, target_max = self._hcrl_dynamic_recovery_targets(policy_name, request_id)
-        overuse = max(0.0, recent_backup_rate - target_max) / max(1.0 - target_max, 1e-8)
-        floor = max(0.0, target_min - recent_backup_rate) / max(target_min, 1e-8)
-
-        advantage = (
-            float(getattr(self.args, "HCRL_CF_Success_Value", 2.40)) * success_gain
-            + float(getattr(self.args, "HCRL_CF_Trust_Value", 0.30)) * trust_gain
-            + float(getattr(self.args, "HCRL_CF_Floor_Value", 0.12)) * floor
-            - float(getattr(self.args, "HCRL_CF_Cost_Value", 0.34)) * cost_extra
-            - float(getattr(self.args, "HCRL_CF_Risk_Value", 0.62)) * risk_delta
-            - float(getattr(self.args, "HCRL_CF_Latency_Value", 0.28)) * latency_extra
-            - float(getattr(self.args, "HCRL_CF_Overuse_Value", 0.35)) * overuse
-        )
-        return {
-            "advantage": float(advantage),
-            "success_gain": float(success_gain),
-            "p_primary": float(p_primary),
-            "p_recovery": float(p_recovery),
-            "risk_delta": float(risk_delta),
-            "cost_extra": float(cost_extra),
-        }
-
-    def _hcrl_choose_counterfactual_mode(self, request_attrs, primary_action, backup_action,
-                                         policy_name, request_id=None):
-        """Choose serial/parallel by larger counterfactual advantage."""
-        par = self._hcrl_counterfactual_recovery_advantage(
-            request_attrs, primary_action, backup_action, policy_name, request_id, mode="parallel"
-        )
-        ser = self._hcrl_counterfactual_recovery_advantage(
-            request_attrs, primary_action, backup_action, policy_name, request_id, mode="serial"
-        )
-        if ser["advantage"] > par["advantage"]:
-            return 1, ser
-        return 2, par
-
-    def _hcrl_backup_candidate(self, request_attrs, primary_action, policy_name):
-        """Return a balanced backup candidate.
-
-        v4 does not use the v3 hard risk/cost filtering as the main mechanism.
-        It selects a candidate by soft utility and lets the balanced recovery gate
-        decide whether to actually invoke recovery. This prevents the backup policy
-        from disappearing in later episodes.
-        """
-        candidates = np.where(self.get_backup_action_mask(request_attrs, primary_action))[0]
-        if candidates.size == 0:
-            return -1, -1e9
-
-        score_vec = self._backup_score_vector(request_attrs, primary_action, policy_name)
-        if getattr(self.args, "HCRL_No_Balanced_Recovery_Gate", False):
-            best = int(candidates[np.argmax(score_vec[candidates])])
-            return best, float(score_vec[best])
-
-        primary_risk = self._hcrl_oracle_risk_estimate(request_attrs, primary_action, policy_name)
-        max_risk_soft = float(getattr(self.args, "HCRL_Backup_Max_Estimated_Risk", 0.58))
-        cost_cap_soft = float(getattr(self.args, "HCRL_Backup_Cost_Cap", 1.12))
-        risk_penalty = float(getattr(self.args, "HCRL_Estimated_Risk_Penalty", 0.24))
-        cost_penalty = float(getattr(self.args, "HCRL_Total_Cost_Penalty", 0.10))
-        trust_bonus = float(getattr(self.args, "HCRL_Backup_Trust_Bonus", 0.18))
-
-        adjusted = np.full(self.oracleNum, -1e9, dtype=float)
-        for c in candidates:
-            c = int(c)
-            risk_c = self._hcrl_oracle_risk_estimate(request_attrs, c, policy_name)
-            trust_c = self._hcrl_trust_proxy(policy_name, c)
-            hist_success_c = self._hcrl_oracle_observed_success(policy_name, c)
-            high_trust_c = max(0.0, trust_c - float(getattr(self.args, "HCRL_High_Trust_Threshold", 0.64)))
-            cost_c = float(self.oracleCost[c])
-            cost_norm = float(np.clip(cost_c / max(float(np.max(self.oracleCost)), 1e-8), 0.0, 1.0))
-            improvement = max(0.0, primary_risk - risk_c)
-            cf = self._hcrl_counterfactual_recovery_advantage(
-                request_attrs, primary_action, c, policy_name, None, mode="parallel"
-            )
-            # Soft barriers only. Do not eliminate all backups as v3 did.
-            risk_over = max(0.0, risk_c - max_risk_soft)
-            cost_over = max(0.0, cost_c - cost_cap_soft)
-            adjusted[c] = (
-                float(score_vec[c])
-                + trust_bonus * trust_c
-                + float(getattr(self.args, "HCRL_Backup_Success_Bias", 0.16)) * hist_success_c
-                + float(getattr(self.args, "HCRL_Backup_HighTrust_Bias", 0.22)) * high_trust_c
-                + 0.28 * improvement
-                + float(getattr(self.args, "HCRL_CF_Candidate_Weight", 0.45)) * cf["advantage"]
-                + float(getattr(self.args, "HCRL_CF_SuccessGain_Candidate_Weight", 0.55)) * cf["success_gain"]
-                - risk_penalty * risk_c
-                - cost_penalty * cost_norm
-                - 0.20 * risk_over
-                - 0.08 * cost_over
-            )
-
-        best = int(candidates[np.argmax(adjusted[candidates])])
-        return best, float(adjusted[best])
-
-    def _hcrl_should_apply_safety_recovery(self, request_attrs, primary_action, primary_success,
-                                           backup_action, backup_score, policy_name, request_id=None):
-        """HCRL-v4 balanced residual recovery gate.
-
-        This replaces the v3 hard risk-budgeted gate. The new gate is deliberately
-        *soft*: it maintains a moderate recovery rate instead of letting recovery
-        collapse to nearly zero, while still discouraging high-cost/high-risk backups.
-        """
-        if getattr(self.args, "HCRL_No_Safety_Gate", False):
-            return False, self._hcrl_primary_risk_estimate(request_attrs, primary_action, policy_name)
-        if int(backup_action) < 0 or int(backup_action) == int(primary_action):
-            return False, self._hcrl_primary_risk_estimate(request_attrs, primary_action, policy_name)
-
-        primary_risk = self._hcrl_oracle_risk_estimate(request_attrs, primary_action, policy_name)
-        backup_risk = self._hcrl_oracle_risk_estimate(request_attrs, backup_action, policy_name)
-        need_score, primary_risk, backup_risk = self._hcrl_recovery_need_score(
-            request_attrs, primary_action, primary_success, backup_action, backup_score, policy_name, request_id
-        )
-        recent_backup_rate = self._hcrl_recent_backup_used_rate(policy_name, request_id)
-        target_min, target_max = self._hcrl_dynamic_recovery_targets(policy_name, request_id)
-        recent_final_rate = self._hcrl_recent_final_success_rate(policy_name, request_id)
-        base_threshold = float(getattr(self.args, "HCRL_Recovery_Need_Threshold", 0.28))
-
-        # Dynamic threshold: lower it if recovery is collapsing; raise it if overused.
-        if recent_backup_rate < target_min:
-            threshold = base_threshold - float(getattr(self.args, "HCRL_Floor_Threshold_Relief", 0.16)) * (target_min - recent_backup_rate) / max(target_min, 1e-8)
-        elif recent_backup_rate > target_max:
-            threshold = base_threshold + float(getattr(self.args, "HCRL_Overuse_Threshold_Penalty", 0.20)) * (recent_backup_rate - target_max) / max(1.0 - target_max, 1e-8)
-        else:
-            threshold = base_threshold
-        if recent_final_rate < float(getattr(self.args, "HCRL_Final_Success_Target", 0.84)):
-            threshold -= float(getattr(self.args, "HCRL_Low_Success_Threshold_Relief", 0.06))
-        threshold = float(np.clip(threshold, 0.06, 0.58))
-
-        # Never use obviously unsafe or impossible backup, but keep this cap looser than v3.
-        if backup_risk > float(getattr(self.args, "HCRL_Backup_Absolute_Risk_Cap", 0.78)):
-            return False, primary_risk
-        if float(backup_score) < float(getattr(self.args, "HCRL_Safety_Min_Backup_Score", 0.04)) and int(primary_success) == 1:
-            return False, primary_risk
-
-        # HCRL-v6: counterfactual recovery advantage gate.
-        if not getattr(self.args, "HCRL_No_Counterfactual_Gate", False):
-            _, cf = self._hcrl_choose_counterfactual_mode(
-                request_attrs, primary_action, backup_action, policy_name, request_id
-            )
-            cf_thr = float(getattr(self.args, "HCRL_CF_Advantage_Threshold", 0.04))
-            cf_fail_thr = float(getattr(self.args, "HCRL_CF_Failure_Threshold", -0.05))
-            if int(primary_success) == 0 and cf["advantage"] >= cf_fail_thr:
-                return True, primary_risk
-            if cf["advantage"] >= cf_thr:
-                return True, primary_risk
-            if cf["advantage"] < -float(getattr(self.args, "HCRL_CF_Prune_Margin", 0.12)) and recent_backup_rate >= target_min:
-                return False, primary_risk
-
-        # If primary failed, allow recovery unless backup is clearly worse and recovery is overused.
-        if int(primary_success) == 0:
-            if recent_backup_rate <= target_max or backup_risk <= primary_risk + 0.12:
-                return True, primary_risk
-
-        return bool(need_score >= threshold), primary_risk
-
-    def _should_use_backup(self, request_attrs, primary, backup_action, backup_score, policy_name):
-        if int(backup_action) == int(primary["action"]):
-            return False
-        if getattr(self.args, "PB_Backup_Mode", "parallel") == "serial":
-            remaining = float(request_attrs[4]) - float(primary["durationT"])
-            estimated_exe = float(request_attrs[2]) / max(float(self.oracleAcc[int(backup_action)]), 1e-8)
-            if remaining <= 0 or estimated_exe > remaining:
-                return False
+    def _should_use_backup(self, policy_name, request_attrs, primary_action, backup_score):
+        if policy_name == "PB-SafeDQN":
+            if getattr(self.args, "PB_Backup_Trigger", "cost_aware") == "always":
+                return True
+            return backup_score >= float(getattr(self.args, "PB_Min_Backup_Score", 0.38))
         if policy_name == "COBRA-Oracle":
             mode = getattr(self.args, "COBRA_Gate_Mode", "adaptive")
-            if mode == "always":
-                return True
-            if mode == "never":
-                return False
-            if mode == "fixed":
-                return float(backup_score) >= float(getattr(self.args, "COBRA_Min_Backup_Score", 0.46))
-            hist = self.backup_score_history.get(policy_name, [])
-            if len(hist) >= 20:
-                window = int(getattr(self.args, "COBRA_Gate_Window", 400))
-                recent = np.asarray(hist[-window:], dtype=float)
-                dyn_thr = float(np.mean(recent) + float(getattr(self.args, "COBRA_Gate_Alpha", 0.15)) * np.std(recent))
-            else:
-                dyn_thr = float(getattr(self.args, "COBRA_Min_Backup_Score", 0.46))
-            return float(backup_score) >= max(float(getattr(self.args, "COBRA_Min_Backup_Score", 0.46)), dyn_thr)
-        if getattr(self.args, "PB_Backup_Trigger", "cost_aware") == "always":
-            return True
-        return float(backup_score) >= float(getattr(self.args, "PB_Min_Backup_Score", 0.38))
+            if mode == "always": return True
+            if mode == "never": return False
+            duration, rep, obs, risk, ontime = self._estimated_oracle_metrics(request_attrs, policy_name)
+            p = int(primary_action)
+            threshold = float(getattr(self.args, "COBRA_Min_Backup_Score", 0.46))
+            if mode == "adaptive":
+                threshold -= 0.10 * float(risk[p]) + 0.05 * (1.0 - float(ontime[p]))
+            return backup_score >= threshold
+        return backup_score >= float(getattr(self.args, "HCRL_Safety_Min_Backup_Score", 0.12))
 
-    def feedback_primary_backup(self, request_attrs, primary_action, policy_name="PB-SafeDQN"):
-        request_id, _, _, _, ddl = request_attrs
-        request_id = int(request_id)
-        ddl = float(ddl)
+    def feedback_primary_backup(self, request_attrs, primary_action, policy_name):
+        self.global_step += 1
+        self._tick_audit_cooldowns()
+        rid, arrival, _, _, ddl = request_attrs; rid = int(rid)
         primary = self._simulate_oracle_attempt(request_attrs, primary_action, policy_name)
-        primary_success = self._is_success(primary, ddl)
+        primary_success = self._is_success(primary, float(ddl))
         backup_action = self.choose_backup_oracle(request_attrs, primary_action, policy_name)
-        score_vec = self._backup_score_vector(request_attrs, primary_action, policy_name)
-        backup_score = float(score_vec[int(backup_action)]) if 0 <= int(backup_action) < self.oracleNum else 0.0
-        if policy_name == "COBRA-Oracle":
-            self.backup_score_history[policy_name].append(backup_score)
-
-        backup_used = 0
-        backup_success = 0
-        backup_recovery = 0
-        backup_skipped = 0
+        backup_score = float(self._backup_score_vector(request_attrs, primary_action, policy_name)[backup_action]) if backup_action != primary_action else -1e9
+        use_backup = self._should_use_backup(policy_name, request_attrs, primary_action, backup_score)
+        mode_parallel = getattr(self.args, "PB_Backup_Mode", "parallel") == "parallel" or policy_name == "COBRA-Oracle"
         backup = None
-        final_success = primary_success
-        final_duration = primary["durationT"]
-        final_leaveT = primary["leaveT"]
-        total_cost = primary["cost"]
-        combined_behavior = primary["behavior_record"]
-        combined_rep = primary["reputation"]
-
-        use_backup = False
-        if primary_success == 0:
-            use_backup = self._should_use_backup(request_attrs, primary, backup_action, backup_score, policy_name)
-            backup_skipped = 0 if use_backup else 1
-
         if use_backup:
-            backup_used = 1
-            if getattr(self.args, "PB_Backup_Mode", "parallel") == "serial":
-                backup = self._simulate_oracle_attempt(request_attrs, backup_action, policy_name, arrival_override=primary["leaveT"])
-                final_duration = primary["durationT"] + backup["durationT"]
-                final_leaveT = backup["leaveT"]
-            else:
+            if mode_parallel:
                 backup = self._simulate_oracle_attempt(request_attrs, backup_action, policy_name)
-                final_duration = min(primary["durationT"], backup["durationT"] if self._is_success(backup, ddl) else max(primary["durationT"], backup["durationT"]))
-                final_leaveT = max(primary["leaveT"], backup["leaveT"])
-            backup_success = self._is_success(backup, ddl)
-            backup_recovery = 1 if (primary_success == 0 and backup_success == 1) else 0
-            final_success = 1 if (primary_success == 1 or backup_success == 1) else 0
-            total_cost += backup["cost"]
+            else:
+                backup = self._simulate_oracle_attempt(request_attrs, backup_action, policy_name, arrival_override=primary["leaveT"])
+        if backup is None:
+            final_success = primary_success
+            final_duration = primary["durationT"]
+            final_leave = primary["leaveT"]
+            total_cost = primary["cost"]
+            final_match = primary["match"]
+            combined_behavior = primary["behavior_record"]
+            combined_rep = primary["reputation"]
+        else:
+            backup_success = self._is_success(backup, float(ddl))
+            final_success = int(primary_success or backup_success)
+            if primary_success and backup_success:
+                winner = primary if primary["durationT"] <= backup["durationT"] else backup
+            elif primary_success:
+                winner = primary
+            elif backup_success:
+                winner = backup
+            else:
+                winner = primary if primary["durationT"] <= backup["durationT"] else backup
+            final_duration = winner["durationT"] if mode_parallel else (primary["durationT"] if primary_success else backup["durationT"])
+            final_leave = max(primary["leaveT"], backup["leaveT"]) if mode_parallel else (primary["leaveT"] if primary_success else backup["leaveT"])
+            total_cost = primary["cost"] + backup["cost"] * (float(getattr(self.args, "HCRL_Parallel_Cost_Discount", 0.85)) if mode_parallel else 1.0)
+            final_match = max(primary["match"], backup["match"])
             combined_behavior = max(primary["behavior_record"], backup["behavior_record"])
             combined_rep = max(primary["reputation"], backup["reputation"])
-
-        if policy_name == "PB-SafeDQN" and backup_used:
-            reward = self._reward_for_attempt(primary, request_attrs, final_success=final_success,
-                                              total_cost=total_cost, final_duration=final_duration,
-                                              combined_behavior=combined_behavior, combined_rep=combined_rep)
-            reward += float(getattr(self.args, "PB_Backup_Recovery_Bonus", 0.38)) * backup_recovery
-            reward -= float(getattr(self.args, "PB_Backup_Used_Penalty", 0.16)) * backup_used
-            reward += float(getattr(self.args, "PB_Primary_Success_Bonus", 0.18)) * primary_success
-            reward -= float(getattr(self.args, "PB_Backup_Skip_Penalty", 0.04)) * backup_skipped
-        elif policy_name == "COBRA-Oracle":
-            reward = self._reward_for_attempt(primary, request_attrs, final_success=final_success,
-                                              total_cost=total_cost, final_duration=final_duration,
-                                              combined_behavior=combined_behavior, combined_rep=combined_rep)
-            reward += float(getattr(self.args, "COBRA_Backup_Recovery_Bonus", 0.34)) * backup_recovery
-            reward -= float(getattr(self.args, "COBRA_Backup_Used_Penalty", 0.22)) * backup_used
-            reward += float(getattr(self.args, "COBRA_Primary_Success_Bonus", 0.26)) * primary_success
-            reward -= float(getattr(self.args, "COBRA_Backup_Skip_Penalty", 0.03)) * backup_skipped
-            reward -= self._constraint_penalty(
-                cost=total_cost, latency=final_duration,
-                risk=max(primary["is_malicious"], backup["is_malicious"] if backup else 0),
-                prefix="COBRA",
-            )
+        audit_risk = 1.0 - float(self.audit_truth_score(policy_name)[int(primary_action)])
+        if backup is not None:
+            audit_risk = min(audit_risk, 1.0 - float(self.audit_truth_score(policy_name)[int(backup_action)]))
+        reward = self._reward_for_attempt(primary, request_attrs, final_success=final_success, total_cost=total_cost,
+                                          final_duration=final_duration, combined_behavior=combined_behavior, combined_rep=combined_rep,
+                                          audit_risk=audit_risk)
+        if use_backup:
+            reward += float(getattr(self.args, "PB_Backup_Recovery_Bonus", 0.38)) * int((not primary_success) and final_success)
+            reward -= float(getattr(self.args, "PB_Backup_Used_Penalty", 0.16))
         else:
-            reward = self._reward_for_attempt(primary, request_attrs, final_success=final_success,
-                                              total_cost=total_cost, final_duration=final_duration,
-                                              combined_behavior=combined_behavior, combined_rep=combined_rep)
-
+            reward += float(getattr(self.args, "PB_Primary_Success_Bonus", 0.18)) * int(primary_success)
         reward = float(np.clip(reward, -float(getattr(self.args, "Reward_Clip", 3.0)), float(getattr(self.args, "Reward_Clip", 3.0))))
-
         self._record_attempt_updates(policy_name, [primary, backup])
-        self._record_request(policy_name, request_id, primary, reward, final_success,
-                             final_duration, final_leaveT, total_cost, primary["match"])
-        self._record_pb_diagnostics(
-            policy_name, request_id, primary, backup, primary_success, backup_used,
-            backup_success, backup_recovery, backup_skipped, backup_score,
-            mode_action=-1, total_cost=total_cost, latency=final_duration,
-            final_risk=max(primary["is_malicious"], backup["is_malicious"] if backup else 0),
-            constrained_prefix="COBRA" if policy_name == "COBRA-Oracle" else None,
-        )
+        self.maybe_trigger_audit(request_attrs, primary, policy_name)
+        if backup is not None:
+            self.maybe_trigger_audit(request_attrs, backup, policy_name)
+        self._record_request(policy_name, rid, primary, reward, final_success, final_duration, final_leave, total_cost, final_match)
+        self._record_pb(policy_name, rid, primary, backup, primary_success, final_success, use_backup, backup_score, -1)
         return reward
 
-    def _constraint_penalty(self, cost, latency, risk, prefix="HCRL", lambdas=None):
-        if prefix == "HCRL" and getattr(self.args, "HCRL_No_Constrained", False):
-            return 0.0
-        cost_budget = float(getattr(self.args, f"{prefix}_Cost_Budget", 1.0))
-        latency_budget = float(getattr(self.args, f"{prefix}_Latency_Budget", 6.0))
-        risk_budget = float(getattr(self.args, f"{prefix}_Risk_Budget", 0.08))
-        lv_cost = max(0.0, float(cost) - cost_budget)
-        lv_latency = max(0.0, float(latency) - latency_budget)
-        lv_risk = max(0.0, float(risk) - risk_budget)
-        if lambdas is None:
-            l_cost = float(getattr(self.args, f"{prefix}_Lambda_Cost", 0.5))
-            l_latency = float(getattr(self.args, f"{prefix}_Lambda_Latency", 0.4))
-            l_risk = float(getattr(self.args, f"{prefix}_Lambda_Risk", 0.8))
-        else:
-            l_cost = float(lambdas.get("cost", 0.5))
-            l_latency = float(lambdas.get("latency", 0.4))
-            l_risk = float(lambdas.get("risk", 0.8))
-        return l_cost * lv_cost + l_latency * lv_latency + l_risk * lv_risk
-
-    # ------------------------------------------------------------------
-    # HCRL
-    # ------------------------------------------------------------------
-    def get_hcrl_mode_state(self, request_attrs, policy_name):
-        base = self.getState(request_attrs, policy_name)
-        start = max(0, int(request_attrs[0]) - self.timeperiodSize)
-        end = max(start + 1, int(request_attrs[0]))
-        recent_cost = float(np.mean(self.events[policy_name][8, start:end])) if end > start else 0.0
-        recent_success = float(np.mean(self.events[policy_name][7, start:end])) if end > start else 0.0
-        recent_latency = float(np.mean(self.events[policy_name][3, start:end])) if end > start else 0.0
-        recent_mal = 0.0
-        if end > start:
-            recent_mal = float(np.mean(np.maximum(
-                self.pb_records[policy_name][6, start:end],
-                self.pb_records[policy_name][7, start:end],
-            )))
-        budget_state = np.array([
-            recent_success,
-            recent_cost / max(float(getattr(self.args, "HCRL_Cost_Budget", 1.0)), 1e-8),
-            recent_latency / max(float(getattr(self.args, "HCRL_Latency_Budget", 6.0)), 1e-8),
-            recent_mal,
-            float(getattr(self.args, "HCRL_Cost_Budget", 1.0)),
-            float(getattr(self.args, "HCRL_Risk_Budget", 0.06)),
-        ], dtype=float)
-        return np.hstack((base, budget_state))
-
-    def _get_hcrl_lambdas(self, policy_name):
-        if policy_name not in self.hcrl_lambdas:
-            self.hcrl_lambdas[policy_name] = {
-                "cost": float(getattr(self.args, "HCRL_Lambda_Cost", 0.55)),
-                "latency": float(getattr(self.args, "HCRL_Lambda_Latency", 0.40)),
-                "risk": float(getattr(self.args, "HCRL_Lambda_Risk", 0.80)),
-            }
-        return self.hcrl_lambdas[policy_name]
-
-    def _update_hcrl_lambdas(self, policy_name, cost_violation, latency_violation, risk_violation):
-        lambdas = self._get_hcrl_lambdas(policy_name)
-        if getattr(self.args, "HCRL_No_Constrained", False) or not getattr(self.args, "HCRL_Primal_Dual", True):
-            return lambdas
-        lr = float(getattr(self.args, "HCRL_Lambda_LR", 0.01))
-        lo = float(getattr(self.args, "HCRL_Lambda_Min", 0.0))
-        hi = float(getattr(self.args, "HCRL_Lambda_Max", 3.0))
-        lambdas["cost"] = float(np.clip(lambdas["cost"] + lr * float(cost_violation), lo, hi))
-        lambdas["latency"] = float(np.clip(lambdas["latency"] + lr * float(latency_violation), lo, hi))
-        lambdas["risk"] = float(np.clip(lambdas["risk"] + lr * float(risk_violation), lo, hi))
-        return lambdas
-
-    def feedback_hcrl(self, request_attrs, mode_action, primary_action, backup_action, policy_name="HCRL-Oracle"):
-        request_id, _, length, _, ddl = request_attrs
-        request_id = int(request_id)
-        ddl = float(ddl)
-        mode_action = int(np.clip(mode_action, 0, 2))
-        primary_action = int(primary_action)
-        backup_action = int(backup_action) if int(backup_action) >= 0 else -1
-
+    def feedback_hcrl(self, request_attrs, mode_action, primary_action, backup_action, policy_name):
+        self.global_step += 1
+        self._tick_audit_cooldowns()
+        rid, arrival, _, _, ddl = request_attrs; rid = int(rid)
+        mode_names = list(getattr(self.args, "HCRL_Mode_Names", ["single_cost", "single_safe", "serial_safe", "parallel_fast", "parallel_safe"]))
+        mode_action = int(np.clip(mode_action, 0, len(mode_names) - 1))
+        mode_name = mode_names[mode_action]
         primary = self._simulate_oracle_attempt(request_attrs, primary_action, policy_name)
-        primary_success = self._is_success(primary, ddl)
-
+        primary_success = self._is_success(primary, float(ddl))
+        if backup_action is None or int(backup_action) < 0 or int(backup_action) == int(primary_action):
+            backup_action = self.choose_backup_oracle(request_attrs, primary_action, policy_name)
+        backup_score = float(self._backup_score_vector(request_attrs, primary_action, policy_name)[int(backup_action)])
+        use_backup = mode_name in ["serial_safe", "parallel_fast", "parallel_safe"] and backup_score > -1e8
+        parallel = mode_name in ["parallel_fast", "parallel_safe"]
         backup = None
-        backup_used = 0
-        backup_success = 0
-        backup_recovery = 0
-        backup_skipped = 0
-        backup_score = 0.0
-        final_success = primary_success
-        final_duration = primary["durationT"]
-        final_leaveT = primary["leaveT"]
-        total_cost = primary["cost"]
-        combined_behavior = primary["behavior_record"]
-        combined_rep = primary["reputation"]
-
-        if backup_action >= 0 and backup_action != primary_action:
-            score_vec = self._backup_score_vector(request_attrs, primary_action, policy_name)
-            backup_score = float(score_vec[backup_action])
-
-        # HCRL-v2 safety gate. If the learned mode policy collapses to single
-        # while the primary is risky or already failed, activate a safe recovery
-        # candidate. This keeps HCRL competitive with DQN while preserving the
-        # learned primary policy and cost-aware recovery diagnostics.
-        original_mode_action = mode_action
-        safety_overrode = 0
-        primary_risk_estimate = self._hcrl_primary_risk_estimate(request_attrs, primary_action, policy_name)
-        if backup_action < 0 or backup_action == primary_action:
-            cand_backup, cand_score = self._hcrl_backup_candidate(request_attrs, primary_action, policy_name)
-            if cand_backup >= 0:
-                backup_action, backup_score = cand_backup, cand_score
-
-        backup_risk_estimate = (
-            self._hcrl_oracle_risk_estimate(request_attrs, backup_action, policy_name)
-            if backup_action >= 0 and backup_action != primary_action else 1.0
-        )
-        primary_trust_proxy = self._hcrl_trust_proxy(policy_name, primary_action)
-        backup_trust_proxy = (
-            self._hcrl_trust_proxy(policy_name, backup_action)
-            if backup_action >= 0 and backup_action != primary_action else 0.0
-        )
-
-        safety_trigger, primary_risk_estimate = self._hcrl_should_apply_safety_recovery(
-            request_attrs, primary_action, primary_success, backup_action, backup_score, policy_name, request_id
-        )
-        cf_mode, cf_info = self._hcrl_choose_counterfactual_mode(
-            request_attrs, primary_action, backup_action, policy_name, request_id
-        )
-        recent_backup_rate = self._hcrl_recent_backup_used_rate(policy_name, request_id)
-        backup_risk_estimate = (
-            self._hcrl_oracle_risk_estimate(request_attrs, backup_action, policy_name)
-            if backup_action >= 0 and backup_action != primary_action else 1.0
-        )
-        backup_trust_proxy = (
-            self._hcrl_trust_proxy(policy_name, backup_action)
-            if backup_action >= 0 and backup_action != primary_action else 0.0
-        )
-        if mode_action == 0 and safety_trigger:
-            safety_overrode = 1
-            recovery_mode = getattr(self.args, "HCRL_Safety_Recovery_Mode", "auto")
-            if recovery_mode == "serial":
-                mode_action = 1
-            elif recovery_mode == "parallel":
-                mode_action = 2
-            else:
-                # HCRL-v6: choose serial or parallel by counterfactual advantage.
-                mode_action = cf_mode
-
-        # HCRL-v6: counterfactual pruning of unnecessary recovery.
-        if (not getattr(self.args, "HCRL_No_Counterfactual_Gate", False)) and mode_action in [1, 2]:
-            final_target = float(getattr(self.args, "HCRL_Final_Success_Target", 0.84))
-            recent_final = self._hcrl_recent_final_success_rate(policy_name, request_id)
-            if (primary_success == 1
-                    and cf_info["advantage"] < -float(getattr(self.args, "HCRL_CF_Prune_Margin", 0.12))
-                    and recent_final >= final_target - 0.025):
-                mode_action = 0
-
-        # mode 0 = single, 1 = serial, 2 = parallel
-        if mode_action == 1:
-            if primary_success == 0 and backup_action >= 0 and backup_action != primary_action:
-                remaining = ddl - float(primary["durationT"])
-                estimated_exe = float(length) / max(float(self.oracleAcc[backup_action]), 1e-8)
-                if remaining > 0 and estimated_exe <= remaining:
-                    backup_used = 1
-                    backup = self._simulate_oracle_attempt(request_attrs, backup_action, policy_name, arrival_override=primary["leaveT"])
-                    backup_success = self._is_success(backup, ddl)
-                    backup_recovery = 1 if backup_success else 0
-                    final_success = 1 if backup_success else 0
-                    final_duration = primary["durationT"] + backup["durationT"]
-                    final_leaveT = backup["leaveT"]
-                else:
-                    backup_skipped = 1
-            elif primary_success == 0:
-                backup_skipped = 1
-        elif mode_action == 2:
-            if backup_action >= 0 and backup_action != primary_action:
-                backup_used = 1
+        if use_backup:
+            if parallel:
                 backup = self._simulate_oracle_attempt(request_attrs, backup_action, policy_name)
-                backup_success = self._is_success(backup, ddl)
-                backup_recovery = 1 if (primary_success == 0 and backup_success == 1) else 0
-                final_success = 1 if (primary_success == 1 or backup_success == 1) else 0
-                # Warm-standby/parallel: successful faster branch determines effective latency;
-                # accounting still records both oracle attempts.
-                if primary_success and backup_success:
-                    final_duration = min(primary["durationT"], backup["durationT"])
-                elif backup_success:
-                    final_duration = backup["durationT"]
-                else:
-                    final_duration = max(primary["durationT"], backup["durationT"])
-                final_leaveT = max(primary["leaveT"], backup["leaveT"])
-            elif primary_success == 0:
-                backup_skipped = 1
-
-        if backup is not None:
-            total_cost += backup["cost"]
+            else:
+                backup = self._simulate_oracle_attempt(request_attrs, backup_action, policy_name, arrival_override=primary["leaveT"])
+        if backup is None:
+            final_success = primary_success
+            final_duration = primary["durationT"]
+            final_leave = primary["leaveT"]
+            total_cost = primary["cost"]
+            final_match = primary["match"]
+            combined_behavior = primary["behavior_record"]
+            combined_rep = primary["reputation"]
+            backup_success = 0
+        else:
+            backup_success = self._is_success(backup, float(ddl))
+            final_success = int(primary_success or backup_success)
+            if parallel:
+                candidates = [a for a, s in [(primary, primary_success), (backup, backup_success)] if s]
+                winner = min(candidates, key=lambda a: a["durationT"]) if candidates else min([primary, backup], key=lambda a: a["durationT"])
+                final_duration = winner["durationT"]
+                final_leave = max(primary["leaveT"], backup["leaveT"])
+                total_cost = primary["cost"] + backup["cost"] * float(getattr(self.args, "HCRL_Parallel_Cost_Discount", 0.85))
+            else:
+                final_duration = primary["durationT"] if primary_success else backup["durationT"]
+                final_leave = primary["leaveT"] if primary_success else backup["leaveT"]
+                total_cost = primary["cost"] + (0.0 if primary_success else backup["cost"])
+            final_match = max(primary["match"], backup["match"])
             combined_behavior = max(primary["behavior_record"], backup["behavior_record"])
             combined_rep = max(primary["reputation"], backup["reputation"])
-
-        if mode_action == 2 and backup is not None:
-            effective_cost_for_constraint = primary["cost"] + float(getattr(self.args, "HCRL_Parallel_Cost_Discount", 0.85)) * backup["cost"]
-        else:
-            effective_cost_for_constraint = total_cost
-        final_risk = max(primary["is_malicious"], backup["is_malicious"] if backup is not None else 0)
-
-        cost_budget = float(getattr(self.args, "HCRL_Cost_Budget", 1.02))
-        latency_budget = float(getattr(self.args, "HCRL_Latency_Budget", 5.95))
-        risk_budget = float(getattr(self.args, "HCRL_Risk_Budget", 0.06))
-        cost_violation = max(0.0, effective_cost_for_constraint - cost_budget)
-        latency_violation = max(0.0, final_duration - latency_budget)
-        risk_violation = max(0.0, final_risk - risk_budget)
-        lambdas = self._update_hcrl_lambdas(policy_name, cost_violation, latency_violation, risk_violation)
-        constraint_penalty = 0.0 if getattr(self.args, "HCRL_No_Constrained", False) else (
-            lambdas["cost"] * cost_violation + lambdas["latency"] * latency_violation + lambdas["risk"] * risk_violation
-        )
-
-        base_reward = self._reward_for_attempt(
-            primary, request_attrs, final_success=final_success, total_cost=total_cost,
-            final_duration=final_duration, combined_behavior=combined_behavior, combined_rep=combined_rep,
-        )
-        primary_reward = self._reward_for_attempt(
-            primary, request_attrs, final_success=primary_success, total_cost=primary["cost"],
-            final_duration=primary["durationT"], combined_behavior=primary["behavior_record"],
-            combined_rep=primary["reputation"],
-        )
-        # v3: train primary selector away from low-trust/high-risk bait oracles.
-        primary_reward += float(getattr(self.args, "HCRL_Trusted_Selection_Bonus", 0.12)) * primary_trust_proxy
-        primary_reward -= float(getattr(self.args, "HCRL_Estimated_Risk_Penalty", 0.45)) * primary_risk_estimate
-        primary_reward -= float(getattr(self.args, "HCRL_Primary_Malicious_Penalty", 0.80)) * primary["is_malicious"]
-        backup_reward = 0.0
-        if backup_used and backup is not None:
-            backup_reward = self._reward_for_attempt(
-                backup, request_attrs, final_success=backup_success, total_cost=backup["cost"],
-                final_duration=backup["durationT"], combined_behavior=backup["behavior_record"],
-                combined_rep=backup["reputation"],
-            )
-            backup_reward += float(getattr(self.args, "HCRL_Backup_Recovery_Bonus", 0.72)) * backup_recovery
-            backup_reward += float(getattr(self.args, "HCRL_Backup_Trust_Bonus", 0.15)) * backup_trust_proxy
-            backup_reward -= float(getattr(self.args, "HCRL_Backup_Used_Penalty", 0.08)) * backup_used
-            backup_reward -= float(getattr(self.args, "HCRL_Estimated_Risk_Penalty", 0.45)) * backup_risk_estimate
-            backup_reward -= float(getattr(self.args, "HCRL_Backup_Malicious_Penalty", 1.20)) * (backup["is_malicious"] if backup is not None else 0)
-
+        primary_audit_risk = 1.0 - float(self.audit_truth_score(policy_name)[int(primary_action)])
+        backup_audit_risk = 0.0 if backup is None else 1.0 - float(self.audit_truth_score(policy_name)[int(backup_action)])
+        audit_risk = max(primary_audit_risk, backup_audit_risk) if mode_name in ["parallel_safe", "serial_safe"] else primary_audit_risk
+        base_reward = self._reward_for_attempt(primary, request_attrs, final_success=final_success, total_cost=total_cost,
+                                               final_duration=final_duration, combined_behavior=combined_behavior, combined_rep=combined_rep,
+                                               audit_risk=audit_risk)
+        # Mode-specific shaping.
         mode_reward = base_reward
-        mode_reward += float(getattr(self.args, "HCRL_Final_Success_Bonus", 0.35)) * final_success
-        mode_reward += float(getattr(self.args, "HCRL_Primary_Success_Bonus", 0.30)) * primary_success
-        mode_reward += float(getattr(self.args, "HCRL_Backup_Recovery_Bonus", 0.72)) * backup_recovery
-        mode_reward += float(getattr(self.args, "HCRL_Success_Gain_Bonus", 0.45)) * max(0, final_success - primary_success)
-        if final_success == 1 and self._hcrl_recent_final_success_rate(policy_name, request_id) < float(getattr(self.args, "HCRL_Final_Success_Target", 0.84)):
-            mode_reward += float(getattr(self.args, "HCRL_Reliability_Target_Bonus", 0.12))
-        mode_reward += float(getattr(self.args, "HCRL_Safety_Override_Bonus", 0.10)) * safety_overrode * final_success
-        if not getattr(self.args, "HCRL_No_Counterfactual_Gate", False):
-            mode_reward += float(getattr(self.args, "HCRL_CF_Mode_Advantage_Bonus", 0.35)) * max(0.0, cf_info["advantage"]) * backup_used
-            mode_reward -= float(getattr(self.args, "HCRL_CF_Negative_Recovery_Penalty", 0.30)) * max(0.0, -cf_info["advantage"]) * backup_used
-        # v4: target recovery-rate shaping.  It prevents late collapse to primary-only
-        # while still discouraging overuse.
-        target_min, target_max = self._hcrl_dynamic_recovery_targets(policy_name, request_id)
-        if backup_used and recent_backup_rate < target_min:
-            mode_reward += float(getattr(self.args, "HCRL_Backup_Floor_Bonus", 0.16))
-        if (primary_success == 0) and (not backup_used) and recent_backup_rate < target_min:
-            mode_reward -= float(getattr(self.args, "HCRL_Backup_Collapse_Penalty", 0.28))
-        if backup_used and primary_success and recent_backup_rate > target_max:
-            overuse_penalty = float(getattr(self.args, "HCRL_Backup_Overuse_Penalty", 0.10))
-            if self._hcrl_recent_final_success_rate(policy_name, request_id) < float(getattr(self.args, "HCRL_Final_Success_Target", 0.84)):
-                overuse_penalty *= 0.55
-            mode_reward -= overuse_penalty
-        # v4: explicit success-risk-cost trade-off shaping.
-        mode_reward += float(getattr(self.args, "HCRL_Trusted_Selection_Bonus", 0.12)) * primary_trust_proxy
-        mode_reward += float(getattr(self.args, "HCRL_Backup_Trust_Bonus", 0.15)) * backup_trust_proxy * backup_used
-        mode_reward -= float(getattr(self.args, "HCRL_Backup_Used_Penalty", 0.08)) * backup_used
-        mode_reward -= float(getattr(self.args, "HCRL_Estimated_Risk_Penalty", 0.45)) * (primary_risk_estimate + backup_used * backup_risk_estimate)
-        mode_reward -= float(getattr(self.args, "HCRL_Total_Cost_Penalty", 0.18)) * max(0.0, effective_cost_for_constraint - cost_budget)
-        mode_reward -= float(getattr(self.args, "HCRL_Primary_Malicious_Penalty", 0.80)) * primary["is_malicious"]
-        mode_reward -= float(getattr(self.args, "HCRL_Backup_Malicious_Penalty", 1.20)) * ((backup["is_malicious"] if backup is not None else 0))
-        # Penalize skipping recovery only when the primary was risky or failed.
-        risk_skip = 1.0 if (primary_risk_estimate >= float(getattr(self.args, "HCRL_Safety_Primary_Risk_Threshold", 0.48)) or primary_success == 0) else 0.0
-        mode_reward -= float(getattr(self.args, "HCRL_Skip_Recovery_Penalty", 0.20)) * backup_skipped * risk_skip
-        if backup_used and primary_success and safety_overrode == 0:
+        primary_reward = base_reward
+        backup_reward = 0.0
+        cost_violation = float(total_cost > float(getattr(self.args, "HCRL_Cost_Budget", 1.0)))
+        latency_violation = float(final_duration > float(getattr(self.args, "HCRL_Latency_Budget", 6.2)))
+        risk_violation = float(primary_audit_risk > float(getattr(self.args, "HCRL_Risk_Budget", 0.06)))
+        if mode_name == "single_cost":
+            mode_reward += 0.12 * (1.0 - primary["cost"]) - 0.25 * primary_audit_risk
+        elif mode_name == "single_safe":
+            mode_reward += 0.18 * primary["reputation"] - 0.35 * primary_audit_risk
+        elif mode_name == "serial_safe":
+            mode_reward += float(getattr(self.args, "HCRL_Backup_Recovery_Bonus", 0.72)) * int((not primary_success) and final_success)
+            mode_reward -= 0.10 * cost_violation + 0.12 * latency_violation
+            backup_reward = mode_reward
+        elif mode_name == "parallel_fast":
+            mode_reward += 0.20 * int(final_duration <= ddl) - float(getattr(self.args, "HCRL_Backup_Used_Penalty", 0.08))
+            mode_reward -= 0.18 * cost_violation
+            backup_reward = mode_reward
+        elif mode_name == "parallel_safe":
+            mode_reward += 0.25 * int(final_success) - 0.30 * max(0.0, backup_audit_risk - 0.50)
+            mode_reward -= 0.20 * cost_violation
+            backup_reward = mode_reward
+        if use_backup and primary_success:
             mode_reward -= float(getattr(self.args, "HCRL_Unnecessary_Backup_Penalty", 0.18))
-        # Extra guard: if recovery was triggered but backup is estimated worse than the primary, penalize it.
-        if backup_used and backup_risk_estimate > primary_risk_estimate + 0.03:
-            mode_reward -= 0.25 * (backup_risk_estimate - primary_risk_estimate)
-        mode_reward -= constraint_penalty
-
-        if getattr(self.args, "HCRL_No_Decoupled_Reward", False):
-            primary_reward = mode_reward
-            backup_reward = mode_reward if backup_used else 0.0
-
-        reward_clip = float(getattr(self.args, "Reward_Clip", 3.0))
-        final_reward = float(np.clip(mode_reward, -reward_clip, reward_clip))
-        primary_reward = float(np.clip(primary_reward, -reward_clip, reward_clip))
-        backup_reward = float(np.clip(backup_reward, -reward_clip, reward_clip))
-        mode_reward = final_reward
-
+        if (not use_backup) and (not primary_success):
+            mode_reward -= float(getattr(self.args, "HCRL_Skip_Recovery_Penalty", 0.20))
+        mode_reward = float(np.clip(mode_reward, -float(getattr(self.args, "Reward_Clip", 3.0)), float(getattr(self.args, "Reward_Clip", 3.0))))
+        primary_reward = float(np.clip(primary_reward - float(getattr(self.args, "HCRL_Primary_Malicious_Penalty", 0.80)) * primary["is_malicious"],
+                                       -float(getattr(self.args, "Reward_Clip", 3.0)), float(getattr(self.args, "Reward_Clip", 3.0))))
+        backup_reward = float(np.clip(backup_reward - float(getattr(self.args, "HCRL_Backup_Malicious_Penalty", 1.20)) * (backup["is_malicious"] if backup else 0),
+                                      -float(getattr(self.args, "Reward_Clip", 3.0)), float(getattr(self.args, "Reward_Clip", 3.0))))
         self._record_attempt_updates(policy_name, [primary, backup])
-        self._record_request(policy_name, request_id, primary, final_reward, final_success,
-                             final_duration, final_leaveT, total_cost, primary["match"])
-        self._record_pb_diagnostics(
-            policy_name, request_id, primary, backup, primary_success, backup_used,
-            backup_success, backup_recovery, backup_skipped, backup_score,
-            mode_action=mode_action, total_cost=effective_cost_for_constraint,
-            latency=final_duration, final_risk=final_risk,
-            constrained_prefix="HCRL", explicit_violations=(cost_violation, latency_violation, risk_violation),
-            lambdas=lambdas,
-        )
+        self.maybe_trigger_audit(request_attrs, primary, policy_name)
+        if backup is not None:
+            self.maybe_trigger_audit(request_attrs, backup, policy_name)
+        self._record_request(policy_name, rid, primary, mode_reward, final_success, final_duration, final_leave, total_cost, final_match)
+        self._record_pb(policy_name, rid, primary, backup, primary_success, final_success, use_backup, backup_score, mode_action)
+        self.pb_records[policy_name][16, rid] = max(cost_violation, latency_violation, risk_violation)
+        self.pb_records[policy_name][17, rid] = cost_violation
+        self.pb_records[policy_name][18, rid] = latency_violation
+        self.pb_records[policy_name][19, rid] = risk_violation
+        self.pb_records[policy_name][20, rid] = self.hcrl_lambdas[policy_name]["cost"]
+        self.pb_records[policy_name][21, rid] = self.hcrl_lambdas[policy_name]["latency"]
+        self.pb_records[policy_name][22, rid] = self.hcrl_lambdas[policy_name]["risk"]
+        return {"mode_reward": mode_reward, "primary_reward": primary_reward, "backup_reward": backup_reward}
 
-        return {
-            "final_reward": final_reward,
-            "mode_reward": mode_reward,
-            "primary_reward": primary_reward,
-            "backup_reward": backup_reward,
-            "primary_success": primary_success,
-            "backup_used": backup_used,
-            "backup_success": backup_success,
-            "backup_recovery": backup_recovery,
-            "final_success": final_success,
-            "safety_overrode": safety_overrode,
-            "primary_risk_estimate": primary_risk_estimate,
-        }
+    def _record_pb(self, policy_name, rid, primary, backup, primary_success, final_success, use_backup, backup_score, mode_action):
+        self.pb_records[policy_name][0, rid] = primary_success
+        self.pb_records[policy_name][1, rid] = 1.0 if use_backup else 0.0
+        self.pb_records[policy_name][2, rid] = self._is_success(backup, self.ddl) if backup is not None else 0.0
+        self.pb_records[policy_name][3, rid] = 1.0 if ((not primary_success) and final_success and use_backup) else 0.0
+        self.pb_records[policy_name][4, rid] = primary["action"]
+        self.pb_records[policy_name][5, rid] = -1 if backup is None else backup["action"]
+        self.pb_records[policy_name][6, rid] = primary["is_malicious"]
+        self.pb_records[policy_name][7, rid] = 0 if backup is None else backup["is_malicious"]
+        self.pb_records[policy_name][8, rid] = primary["is_trusted"]
+        self.pb_records[policy_name][9, rid] = 0 if backup is None else backup["is_trusted"]
+        self.pb_records[policy_name][10, rid] = 0.0 if use_backup else 1.0
+        self.pb_records[policy_name][11, rid] = 0.0 if backup_score < -1e8 else backup_score
+        self.pb_records[policy_name][12, rid] = mode_action
+        if mode_action in [-1, 0, 1]: self.pb_records[policy_name][13, rid] = 1
+        if mode_action == 2: self.pb_records[policy_name][14, rid] = 1
+        if mode_action in [3, 4]: self.pb_records[policy_name][15, rid] = 1
+        if backup_score > -1e8: self.backup_score_history[policy_name].append(float(backup_score))
 
-    def _record_pb_diagnostics(self, policy_name, request_id, primary, backup, primary_success,
-                               backup_used, backup_success, backup_recovery, backup_skipped,
-                               backup_score, mode_action=-1, total_cost=0.0, latency=0.0,
-                               final_risk=0.0, constrained_prefix=None,
-                               explicit_violations=None, lambdas=None):
-        r = self.pb_records[policy_name]
-        r[0, request_id] = primary_success
-        r[1, request_id] = backup_used
-        r[2, request_id] = backup_success
-        r[3, request_id] = backup_recovery
-        r[4, request_id] = primary["action"]
-        r[5, request_id] = backup["action"] if backup is not None else -1
-        r[6, request_id] = primary["is_malicious"]
-        r[7, request_id] = backup["is_malicious"] if backup is not None else 0
-        r[8, request_id] = primary["is_trusted"]
-        r[9, request_id] = backup["is_trusted"] if backup is not None else 0
-        r[10, request_id] = backup_skipped
-        r[11, request_id] = 0.0 if not np.isfinite(backup_score) else backup_score
-        r[12, request_id] = mode_action
-        r[13, request_id] = 1 if mode_action == 0 else 0
-        r[14, request_id] = 1 if mode_action == 1 else 0
-        r[15, request_id] = 1 if mode_action == 2 else 0
-
-        if constrained_prefix is not None:
-            if explicit_violations is None:
-                cost_budget = float(getattr(self.args, f"{constrained_prefix}_Cost_Budget", 1.0))
-                latency_budget = float(getattr(self.args, f"{constrained_prefix}_Latency_Budget", 6.0))
-                risk_budget = float(getattr(self.args, f"{constrained_prefix}_Risk_Budget", 0.08))
-                cost_violation = max(0.0, float(total_cost) - cost_budget)
-                latency_violation = max(0.0, float(latency) - latency_budget)
-                risk_violation = max(0.0, float(final_risk) - risk_budget)
-            else:
-                cost_violation, latency_violation, risk_violation = explicit_violations
-            r[17, request_id] = cost_violation
-            r[18, request_id] = latency_violation
-            r[19, request_id] = risk_violation
-            r[16, request_id] = 1.0 if (cost_violation > 0 or latency_violation > 0 or risk_violation > 0) else 0.0
-            if lambdas is None:
-                if constrained_prefix == "HCRL":
-                    lambdas = self._get_hcrl_lambdas(policy_name)
-                else:
-                    lambdas = {
-                        "cost": float(getattr(self.args, f"{constrained_prefix}_Lambda_Cost", 0.0)),
-                        "latency": float(getattr(self.args, f"{constrained_prefix}_Lambda_Latency", 0.0)),
-                        "risk": float(getattr(self.args, f"{constrained_prefix}_Lambda_Risk", 0.0)),
-                    }
-            r[20, request_id] = float(lambdas.get("cost", 0.0))
-            r[21, request_id] = float(lambdas.get("latency", 0.0))
-            r[22, request_id] = float(lambdas.get("risk", 0.0))
+    def feedback_PSG_FWA(self, request_attrs, policy_name):
+        score = self._primary_score_vector(request_attrs, policy_name)
+        if getattr(self.args, "SemiGreedy_View", "myopic") == "risk_aware":
+            score -= 0.20 * (1.0 - self.audit_truth_score(policy_name))
+        return score, self.oracleCost.copy()
 
     # ------------------------------------------------------------------
-    # SemiGreedy helper and direct getters for baselines
+    # Getters for logging and final summaries
     # ------------------------------------------------------------------
-    def feedback_PSG_FWA(self, request_attrs, policy_name="SemiGreedy"):
-        rewards = np.zeros(self.oracleNum, dtype=float)
-        costs = self.oracleCost.copy()
-        for a in range(self.oracleNum):
-            wait = max(self.oracle_events[policy_name][0, a] - float(request_attrs[1]), 0.0)
-            exeT = float(request_attrs[2]) / max(float(self.oracleAcc[a]), 1e-8)
-            duration = wait + exeT
-            match = 1 if int(request_attrs[3]) == int(self.oracleTypes[a]) else 0
-            rep = self.oracle_events[policy_name][2, a]
-            observed_val = self._effective_validation_prob(a, policy_name) if getattr(self.args, "SemiGreedy_View", "myopic") == "risk_aware" else 1.0
-            if getattr(self.args, "Reward_Mode", "original") == "risk_aware" or getattr(self.args, "SemiGreedy_View", "myopic") == "risk_aware":
-                rewards[a] = self._risk_aware_reward(rep, match, observed_val, self.oracleCost[a], duration, request_attrs[4], 0.0)
-            else:
-                rewards[a] = self._original_reward(exeT, duration, self.oracleCost[a], rep, request_attrs[3], self.oracleTypes[a])
-        return rewards, costs
+    def _slice(self, arr, startP):
+        return arr[:, int(startP):] if arr.ndim == 2 else arr[int(startP):]
 
-    def get_oracle_idleT(self, policy_name):
-        return self.oracle_events[policy_name][0]
+    def get_oracle_idleT(self, policy_name): return self.oracle_events[policy_name][0]
+    def get_request_num(self, policy_name): return self.reputation_factors[policy_name][0]
+    def get_successful_validation(self, policy_name): return self.reputation_factors[policy_name][1]
 
-    def get_request_num(self, policy_name):
-        return self.reputation_factors[policy_name][0]
+    def get_totalRewards(self, baseline_num, startP=0): return np.array([np.sum(self.events[n][5, int(startP):]) for n in self.policy_names])
+    def get_total_responseTs(self, baseline_num, startP=0): return np.array([np.mean(self.events[n][3, int(startP):]) for n in self.policy_names])
+    def get_totalSuccess(self, baseline_num, startP=0): return np.array([np.mean(self.events[n][7, int(startP):]) for n in self.policy_names])
+    def get_totalSuccessInTime(self, baseline_num, startP=0): return np.array([np.mean(self.events[n][10, int(startP):]) for n in self.policy_names])
+    def get_totalTimes(self, baseline_num, startP=0): return np.array([np.mean(self.events[n][4, int(startP):]) for n in self.policy_names])
+    def get_totalCost(self, baseline_num, startP=0): return np.array([np.mean(self.events[n][8, int(startP):]) for n in self.policy_names])
+    def get_totalMatch(self, baseline_num, startP=0): return np.array([np.mean(self.events[n][9, int(startP):]) for n in self.policy_names])
 
-    def get_successful_validation(self, policy_name):
-        return self.reputation_factors[policy_name][1]
+    def get_totalAssignedMaliciousRate(self, baseline_num, startP=0): return np.array([np.mean(np.isin(self.events[n][0, int(startP):].astype(int), self.malicious_oracles)) for n in self.policy_names])
+    def get_totalAssignedNormalRate(self, baseline_num, startP=0): return np.array([np.mean(np.isin(self.events[n][0, int(startP):].astype(int), self.normal_oracles)) for n in self.policy_names])
+    def get_totalAssignedTrustedRate(self, baseline_num, startP=0): return np.array([np.mean(np.isin(self.events[n][0, int(startP):].astype(int), self.trusted_oracles)) for n in self.policy_names])
 
-    # ------------------------------------------------------------------
-    # Accumulate metrics kept for original main.py compatibility
-    # ------------------------------------------------------------------
-    def _metric_by_policy(self, row, Baseline_num, startP=0, reducer="mean"):
-        out = np.zeros(Baseline_num, dtype=float)
-        startP = int(max(0, startP))
-        for i, name in enumerate(self.policy_names[:Baseline_num]):
-            values = self.events[name][row, startP:]
-            values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-            if values.size == 0:
-                out[i] = 0.0
-            elif reducer == "sum":
-                out[i] = float(np.sum(values))
-            elif reducer == "last":
-                out[i] = float(values[-1])
-            else:
-                out[i] = float(np.mean(values))
-        return out
+    def get_totalPrimarySuccessRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][0, int(startP):]) for n in self.policy_names])
+    def get_totalBackupUsedRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][1, int(startP):]) for n in self.policy_names])
+    def get_totalBackupSuccessRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][2, int(startP):]) for n in self.policy_names])
+    def get_totalBackupRecoveryRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][3, int(startP):]) for n in self.policy_names])
+    def get_totalConditionalBackupRecoveryRate(self, baseline_num, startP=0):
+        out = []
+        for n in self.policy_names:
+            used = self.pb_records[n][1, int(startP):]
+            rec = self.pb_records[n][3, int(startP):]
+            out.append(float(np.sum(rec) / max(np.sum(used), 1e-8)))
+        return np.array(out)
+    def get_totalBackupSkippedRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][10, int(startP):]) for n in self.policy_names])
+    def get_totalBackupScoreMean(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][11, int(startP):]) for n in self.policy_names])
+    def get_totalPrimaryMaliciousRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][6, int(startP):]) for n in self.policy_names])
+    def get_totalBackupMaliciousRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][7, int(startP):]) for n in self.policy_names])
+    def get_totalPrimaryTrustedRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][8, int(startP):]) for n in self.policy_names])
+    def get_totalBackupTrustedRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][9, int(startP):]) for n in self.policy_names])
+    def get_totalCostPerSuccess(self, baseline_num, startP=0):
+        return np.array([np.mean(self.events[n][8, int(startP):]) / max(np.mean(self.events[n][7, int(startP):]), 1e-8) for n in self.policy_names])
+    def get_totalHCRLSingleModeRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][13, int(startP):]) for n in self.policy_names])
+    def get_totalHCRLSerialModeRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][14, int(startP):]) for n in self.policy_names])
+    def get_totalHCRLParallelModeRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][15, int(startP):]) for n in self.policy_names])
+    def get_totalConstraintViolationRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][16, int(startP):]) for n in self.policy_names])
+    def get_totalCostViolationRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][17, int(startP):]) for n in self.policy_names])
+    def get_totalLatencyViolationRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][18, int(startP):]) for n in self.policy_names])
+    def get_totalRiskViolationRate(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][19, int(startP):]) for n in self.policy_names])
+    def get_totalHCRLLambdaCost(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][20, int(startP):]) for n in self.policy_names])
+    def get_totalHCRLLambdaLatency(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][21, int(startP):]) for n in self.policy_names])
+    def get_totalHCRLLambdaRisk(self, baseline_num, startP=0): return np.array([np.mean(self.pb_records[n][22, int(startP):]) for n in self.policy_names])
+    def get_totalAuditRate(self, baseline_num, startP=0): return np.array([np.mean(self.audit_records[n][0, int(startP):]) for n in self.policy_names])
+    def get_totalAuditPassRate(self, baseline_num, startP=0): return np.array([np.mean(self.audit_records[n][1, int(startP):]) for n in self.policy_names])
+    def get_totalAuditFailRate(self, baseline_num, startP=0): return np.array([np.mean(self.audit_records[n][2, int(startP):]) for n in self.policy_names])
+    def get_totalAuditTruthMean(self, baseline_num, startP=0): return np.array([np.mean(self.audit_truth_score(n)) for n in self.policy_names])
 
-    def get_accumulateRewards(self, Baseline_num, startP, request_c):
-        return self.get_totalRewards(Baseline_num, startP, endP=request_c)
-
-    def get_accumulateCost(self, Baseline_num, startP, request_c):
-        return self.get_totalCost(Baseline_num, startP, endP=request_c)
-
-    def get_FinishTimes(self, Baseline_num, startP, request_c):
-        return self.get_totalTimes(Baseline_num, startP, endP=request_c)
-
-    def get_executeTs(self, Baseline_num, startP, request_c):
-        return self._window_event_mean(6, Baseline_num, startP, request_c)
-
-    def get_waitTs(self, Baseline_num, startP, request_c):
-        return self._window_event_mean(2, Baseline_num, startP, request_c)
-
-    def get_responseTs(self, Baseline_num, startP, request_c):
-        return self._window_event_mean(3, Baseline_num, startP, request_c)
-
-    def get_successTimes(self, Baseline_num, startP, request_c):
-        return self._window_event_mean(7, Baseline_num, startP, request_c)
-
-    def get_successInTime(self, Baseline_num, startP, endP):
-        """Window on-time completion rate, not final task success.
-
-        success_rate counts final task success (row 7).
-        success_time_rate counts whether the attempt/recovery completed within deadline (row 10).
-        """
-        result = np.zeros(Baseline_num, dtype=float)
-        startP = int(max(startP, 0))
-        endP = int(min(endP, self.requestNum))
-        denom = max(endP - startP, 1)
-        for i, name in enumerate(self.policy_names[:Baseline_num]):
-            if self.events[name].shape[0] > 10:
-                result[i] = float(np.sum(self.events[name][10, startP:endP]) / denom)
-            else:
-                result[i] = float(np.sum(self.events[name][7, startP:endP]) / denom)
-        return result
-    def _window_event_mean(self, row, Baseline_num, startP=0, endP=None):
-        out = np.zeros(Baseline_num, dtype=float)
-        startP = int(max(0, startP))
-        endP = self.requestNum if endP is None else int(min(max(endP, startP + 1), self.requestNum))
-        for i, name in enumerate(self.policy_names[:Baseline_num]):
-            values = self.events[name][row, startP:endP]
-            values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-            out[i] = float(np.mean(values)) if values.size else 0.0
-        return out
-
-    # ------------------------------------------------------------------
-    # Final summary getters used by main.py
-    # ------------------------------------------------------------------
-    def get_totalRewards(self, Baseline_num, startP=0, endP=None):
-        return self._window_event_sum(5, Baseline_num, startP, endP)
-
-    def get_total_responseTs(self, Baseline_num, startP=0, endP=None):
-        return self._window_event_mean(3, Baseline_num, startP, endP)
-
-    def get_totalSuccess(self, Baseline_num, startP=0, endP=None):
-        return self._window_event_mean(7, Baseline_num, startP, endP)
-
-    def get_totalSuccessInTime(self, Baseline_num, startP=0):
-        """Total on-time completion rate from startP to the end of the workload."""
-        result = np.zeros(Baseline_num, dtype=float)
-        startP = int(max(startP, 0))
-        denom = max(self.requestNum - startP, 1)
-        for i, name in enumerate(self.policy_names[:Baseline_num]):
-            if self.events[name].shape[0] > 10:
-                result[i] = float(np.sum(self.events[name][10, startP:]) / denom)
-            else:
-                result[i] = float(np.sum(self.events[name][7, startP:]) / denom)
-        return result
-    def get_totalTimes(self, Baseline_num, startP=0, endP=None):
-        # Finish time is the maximum leave time in the evaluation window.
-        out = np.zeros(Baseline_num, dtype=float)
-        startP = int(max(0, startP))
-        endP = self.requestNum if endP is None else int(min(max(endP, startP + 1), self.requestNum))
-        for i, name in enumerate(self.policy_names[:Baseline_num]):
-            values = self.events[name][4, startP:endP]
-            values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-            out[i] = float(np.max(values)) if values.size else 0.0
-        return out
-
-    def get_totalCost(self, Baseline_num, startP=0, endP=None):
-        return self._window_event_mean(8, Baseline_num, startP, endP)
-
-    def get_totalMatchRate(self, Baseline_num, startP=0, endP=None):
-        return self._window_event_mean(9, Baseline_num, startP, endP)
-
-    def _window_event_sum(self, row, Baseline_num, startP=0, endP=None):
-        out = np.zeros(Baseline_num, dtype=float)
-        startP = int(max(0, startP))
-        endP = self.requestNum if endP is None else int(min(max(endP, startP + 1), self.requestNum))
-        for i, name in enumerate(self.policy_names[:Baseline_num]):
-            values = self.events[name][row, startP:endP]
-            values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-            out[i] = float(np.sum(values)) if values.size else 0.0
-        return out
-
-    def get_totalMaliciousNum(self, Baseline_num, startP=0, endP=None):
-        return self._role_count(Baseline_num, startP, endP, role="malicious")
-
-    def get_totalNormalNum(self, Baseline_num, startP=0, endP=None):
-        return self._role_count(Baseline_num, startP, endP, role="normal")
-
-    def get_totalTrustedNum(self, Baseline_num, startP=0, endP=None):
-        return self._role_count(Baseline_num, startP, endP, role="trusted")
-
-    def _role_count(self, Baseline_num, startP=0, endP=None, role="malicious"):
-        out = np.zeros(Baseline_num, dtype=float)
-        startP = int(max(0, startP))
-        endP = self.requestNum if endP is None else int(min(max(endP, startP + 1), self.requestNum))
-        if role == "malicious":
-            role_set = set(map(int, self.malicious_oracles))
-        elif role == "normal":
-            role_set = set(map(int, self.normal_oracles))
-        else:
-            role_set = set(map(int, self.trusted_oracles))
-        for i, name in enumerate(self.policy_names[:Baseline_num]):
-            primary_actions = self.pb_records[name][4, startP:endP].astype(int)
-            backup_actions = self.pb_records[name][5, startP:endP].astype(int)
-            cnt = sum(1 for a in primary_actions if a in role_set)
-            cnt += sum(1 for a in backup_actions if a in role_set)
-            out[i] = float(cnt)
-        return out
-
-    def _mean_pb_record_row(self, row_idx, Baseline_num, startP=0, endP=None):
-        out = np.zeros(Baseline_num, dtype=float)
-        startP = int(max(0, startP))
-        endP = self.requestNum if endP is None else int(min(max(endP, startP + 1), self.requestNum))
-        for i, name in enumerate(self.policy_names[:Baseline_num]):
-            if name not in self.pb_records:
-                out[i] = 0.0
-                continue
-            values = self.pb_records[name][row_idx, startP:endP]
-            values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-            out[i] = float(np.mean(values)) if values.size else 0.0
-        return out
-
-    def _sum_pb_record_row(self, row_idx, Baseline_num, startP=0, endP=None):
-        out = np.zeros(Baseline_num, dtype=float)
-        startP = int(max(0, startP))
-        endP = self.requestNum if endP is None else int(min(max(endP, startP + 1), self.requestNum))
-        for i, name in enumerate(self.policy_names[:Baseline_num]):
-            values = self.pb_records[name][row_idx, startP:endP]
-            values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-            out[i] = float(np.sum(values)) if values.size else 0.0
-        return out
-
-    def get_totalPrimarySuccessRate(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(0, Baseline_num, startP, endP)
-
-    def get_totalBackupUsedRate(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(1, Baseline_num, startP, endP)
-
-    def get_totalBackupSuccessRate(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(2, Baseline_num, startP, endP)
-
-    def get_totalBackupRecoveryRate(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(3, Baseline_num, startP, endP)
-
-    def get_totalBackupSkippedRate(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(10, Baseline_num, startP, endP)
-
-    def get_totalConditionalBackupRecoveryRate(self, Baseline_num, startP=0, endP=None):
-        out = np.zeros(Baseline_num, dtype=float)
-        startP = int(max(0, startP))
-        endP = self.requestNum if endP is None else int(min(max(endP, startP + 1), self.requestNum))
-        for i, name in enumerate(self.policy_names[:Baseline_num]):
-            used = np.sum(self.pb_records[name][1, startP:endP])
-            rec = np.sum(self.pb_records[name][3, startP:endP])
-            out[i] = float(rec / used) if used > 1e-8 else 0.0
-        return out
-
-    def get_totalBackupScoreMean(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(11, Baseline_num, startP, endP)
-
-    def get_totalPrimaryMaliciousNum(self, Baseline_num, startP=0, endP=None):
-        return self._sum_pb_record_row(6, Baseline_num, startP, endP)
-
-    def get_totalBackupMaliciousNum(self, Baseline_num, startP=0, endP=None):
-        return self._sum_pb_record_row(7, Baseline_num, startP, endP)
-
-    def get_totalPrimaryTrustedNum(self, Baseline_num, startP=0, endP=None):
-        return self._sum_pb_record_row(8, Baseline_num, startP, endP)
-
-    def get_totalBackupTrustedNum(self, Baseline_num, startP=0, endP=None):
-        return self._sum_pb_record_row(9, Baseline_num, startP, endP)
-
-    def get_totalCostPerSuccess(self, Baseline_num, startP=0, endP=None):
-        cost = self.get_totalCost(Baseline_num, startP, endP)
-        success = self.get_totalSuccess(Baseline_num, startP, endP)
-        return cost / np.maximum(success, 1e-8)
-
-    def get_totalHCRLSingleModeRate(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(13, Baseline_num, startP, endP)
-
-    def get_totalHCRLSerialModeRate(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(14, Baseline_num, startP, endP)
-
-    def get_totalHCRLParallelModeRate(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(15, Baseline_num, startP, endP)
-
-    def get_totalConstraintViolationRate(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(16, Baseline_num, startP, endP)
-
-    def get_totalConstraintViolationMean(self, Baseline_num, startP=0, endP=None):
-        return self.get_totalConstraintViolationRate(Baseline_num, startP, endP)
-
-    def get_totalCostViolationMean(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(17, Baseline_num, startP, endP)
-
-    def get_totalLatencyViolationMean(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(18, Baseline_num, startP, endP)
-
-    def get_totalRiskViolationMean(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(19, Baseline_num, startP, endP)
-
-    def get_totalLambdaCostMean(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(20, Baseline_num, startP, endP)
-
-    def get_totalLambdaLatencyMean(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(21, Baseline_num, startP, endP)
-
-    def get_totalLambdaRiskMean(self, Baseline_num, startP=0, endP=None):
-        return self._mean_pb_record_row(22, Baseline_num, startP, endP)
-
-    # Common aliases, in case main.py uses slightly different names.
-    def get_totalCostViolationRate(self, Baseline_num, startP=0, endP=None):
-        return self.get_totalCostViolationMean(Baseline_num, startP, endP)
-
-    def get_totalLatencyViolationRate(self, Baseline_num, startP=0, endP=None):
-        return self.get_totalLatencyViolationMean(Baseline_num, startP, endP)
-
-    def get_totalRiskViolationRate(self, Baseline_num, startP=0, endP=None):
-        return self.get_totalRiskViolationMean(Baseline_num, startP, endP)
-
-    def get_totalHCRLLambdaCost(self, Baseline_num, startP=0, endP=None):
-        return self.get_totalLambdaCostMean(Baseline_num, startP, endP)
-
-    def get_totalHCRLLambdaLatency(self, Baseline_num, startP=0, endP=None):
-        return self.get_totalLambdaLatencyMean(Baseline_num, startP, endP)
-
-    def get_totalHCRLLambdaRisk(self, Baseline_num, startP=0, endP=None):
-        return self.get_totalLambdaRiskMean(Baseline_num, startP, endP)
-
-    def __getattr__(self, name):
-        """Compatibility guard for older/newer main.py summary getters.
-
-        This only handles get_total* methods that are absent and returns a zero
-        vector. It prevents final CSV writing from crashing because of a missing
-        optional diagnostic getter, while core simulation methods still raise
-        normal AttributeError.
-        """
-        if name.startswith("get_total"):
-            def _missing_total_getter(Baseline_num, startP=0, *args, **kwargs):
-                return np.zeros(int(Baseline_num), dtype=float)
-            return _missing_total_getter
-        raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
+    # Compatibility getters used by original plotting code.
+    def get_accumulateRewards(self, baseline_num, performance_c, request_c): return self.get_totalRewards(baseline_num, performance_c)
+    def get_accumulateCost(self, baseline_num, performance_c, request_c): return self.get_totalCost(baseline_num, performance_c)
+    def get_FinishTimes(self, baseline_num, performance_c, request_c): return self.get_totalTimes(baseline_num, performance_c)
+    def get_executeTs(self, baseline_num, performance_c, request_c): return np.array([np.mean(self.events[n][6, int(performance_c):int(request_c)]) for n in self.policy_names])
+    def get_waitTs(self, baseline_num, performance_c, request_c): return np.array([np.mean(self.events[n][2, int(performance_c):int(request_c)]) for n in self.policy_names])
+    def get_responseTs(self, baseline_num, performance_c, request_c): return np.array([np.mean(self.events[n][3, int(performance_c):int(request_c)]) for n in self.policy_names])
+    def get_successTimes(self, baseline_num, performance_c, request_c): return np.array([np.mean(self.events[n][7, int(performance_c):int(request_c)]) for n in self.policy_names])
+    def get_successInTime(self, baseline_num, performance_c, request_c): return np.array([np.mean(self.events[n][10, int(performance_c):int(request_c)]) for n in self.policy_names])
