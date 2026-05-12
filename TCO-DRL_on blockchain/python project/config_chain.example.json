@@ -1,0 +1,15 @@
+{
+  "rpc_http": "http://127.0.0.1:8545",
+  "contract_artifact": "../build/contracts/Selection.json",
+  "contract_address": "",
+  "from_account_index": 0,
+  "method": "HCRL-Oracle",
+  "weights": {
+    "mode": "../../TCO-DRL_with baseline/output/26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare/HCRL_Mode.npz",
+    "primary": "../../TCO-DRL_with baseline/output/26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare/HCRL_Primary.npz",
+    "backup": "../../TCO-DRL_with baseline/output/26_5_10_19_01_Epoch30_Req6000_rl_harder_Seed6_hcrl_v4_balanced_dqn_compare/HCRL_Backup.npz"
+  },
+  "max_requests": 100,
+  "output_dir": "onchain_output",
+  "dry_run": false
+}
