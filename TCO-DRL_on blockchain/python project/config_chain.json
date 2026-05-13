@@ -1,0 +1,15 @@
+{
+  "rpc_http": "http://127.0.0.1:8545",
+  "contract_artifact": "../build/contracts/Selection.json",
+  "contract_address": "0x066034fBb28BCE5b40bC88Ee580e891528de8382",
+  "from_account_index": 0,
+  "method": "HCRL-Oracle",
+  "weights": {
+    "mode": "../weight/audit_hcrl/HCRL_Mode.npz",
+    "primary": "../weight/audit_hcrl/HCRL_Primary.npz",
+    "backup": "../weight/audit_hcrl/HCRL_Backup.npz"
+  },
+  "max_requests": 100,
+  "output_dir": "onchain_output",
+  "dry_run": false
+}
