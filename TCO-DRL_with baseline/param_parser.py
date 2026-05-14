@@ -90,9 +90,15 @@ def _resolve_selected_methods(args):
     return args
 
 
+def _add_bool(parser, name, default=False, help_text=None):
+    # Keep argparse behavior simple: flag present -> True.
+    parser.add_argument(name, action="store_true", default=default, help=help_text)
+
+
 def parameter_parser():
     p = argparse.ArgumentParser(description="TCO-DRL / Audit-aware HCRL-Oracle experiments")
 
+    # Method selection and run control.
     p.add_argument("--Baselines", nargs="+", default=None)
     p.add_argument("--Methods", "--Run_Methods", nargs="+", default=None,
                    help="Exact methods to run, e.g. --Methods DQN HCRL")
@@ -103,6 +109,24 @@ def parameter_parser():
     p.add_argument("--Seed", type=int, default=6)
     p.add_argument("--Output_Dir", type=str, default="output")
     p.add_argument("--Run_Tag", type=str, default="")
+
+    # Dynamic malicious training. These are also stripped/attached by replacement main.py,
+    # but keeping them here makes this parser robust if used by other scripts.
+    p.add_argument("--Dynamic_Malicious_Training", action="store_true")
+    p.add_argument("--Dynamic_Malicious_Refresh", choices=["episode", "period", "request"], default="episode")
+    p.add_argument("--Dynamic_Malicious_Refresh_Periods", type=int, default=1)
+    p.add_argument("--Dynamic_Malicious_Ratio", type=float, default=-1.0)
+    p.add_argument("--Dynamic_Malicious_Count", type=int, default=-1)
+    p.add_argument("--Dynamic_Malicious_Strategy", choices=["service_balanced", "global"], default="service_balanced")
+    p.add_argument("--Dynamic_Malicious_Profile_Strength", type=float, default=1.0)
+    p.add_argument("--Dynamic_Malicious_Log", action="store_true")
+    p.add_argument("--Dynamic_Malicious_Seed_Offset", type=int, default=7919)
+    p.add_argument("--Disable_Dynamic_Malicious_Curriculum", action="store_true")
+    p.add_argument("--Dynamic_Malicious_Start_Ratio", type=float, default=0.08)
+    p.add_argument("--Dynamic_Malicious_Start_Strength", type=float, default=0.55)
+    p.add_argument("--Dynamic_Malicious_Warmup_Episodes", type=int, default=12)
+    p.add_argument("--Disable_Dynamic_HCRL_Tune", action="store_true")
+    p.add_argument("--Dynamic_HCRL_Tune_Mode", choices=["success", "balanced", "safe", "aggressive"], default="success")
 
     # Learning models.
     p.add_argument("--Dqn_start_learn", type=int, default=300)
@@ -242,10 +266,8 @@ def parameter_parser():
     p.add_argument("--HCRL_Fixed_Parallel_Mode", action="store_true")
 
     # Audit-aware reputation adjustment.
-    p.add_argument("--Use_Audit_Reputation", action="store_true", default=True,
-                   help="Enable hidden/risk-triggered oracle audit and reputation correction. Enabled by default.")
-    p.add_argument("--Disable_Audit_Reputation", action="store_true",
-                   help="Ablation: disable audit-adjusted reputation.")
+    p.add_argument("--Use_Audit_Reputation", action="store_true", default=True)
+    p.add_argument("--Disable_Audit_Reputation", action="store_true")
     p.add_argument("--Audit_Base_Rate", type=float, default=0.03)
     p.add_argument("--Audit_Risk_Rate", type=float, default=0.10)
     p.add_argument("--Audit_Alpha0", type=float, default=2.0)
@@ -408,8 +430,8 @@ def _generate_oracle_community(args):
     malicious_index, normal_index, trusted_index = [], [], []
 
     idx = 0
-    for service_type in range(args.Service_Type_Num):
-        for k in range(args.Oracles_Per_Type):
+    for service_type in range(int(args.Service_Type_Num)):
+        for k in range(int(args.Oracles_Per_Type)):
             role = role_pattern[k % len(role_pattern)]
             oracle_type.append(service_type)
             if args.Scenario == "validation_stress":
@@ -444,15 +466,12 @@ def _generate_oracle_community(args):
                     "trusted_mid": (0.65, 1.10, 400, [0.90, 0.10, 0.00, 0.00], 0.90, 0.02),
                     "trusted_high":(0.95, 1.20, 700, [0.98, 0.02, 0.00, 0.00], 0.98, 0.00),
                 }
-            cost, acc, token, probs, val, fatigue = table[role]
-            # Tiny deterministic service/type perturbation prevents tied rankings.
-            cost = float(cost + 0.005 * (k % 3))
-            acc = float(acc + 0.02 * ((service_type + k) % 3))
+            cost, acc, token, behavior, validation, fatigue = table[role]
             oracle_cost.append(cost)
             oracle_acc.append(acc)
             oracle_tokens.append(token)
-            oracle_behavior_probs.append(probs)
-            oracle_validation_probs.append(val)
+            oracle_behavior_probs.append(behavior)
+            oracle_validation_probs.append(validation)
             oracle_fatigue_sensitivity.append(fatigue)
             if role == "malicious":
                 malicious_index.append(idx)
@@ -469,7 +488,7 @@ def _generate_oracle_community(args):
     args.Oracle_Behavior_Probs = oracle_behavior_probs
     args.Oracle_Validation_Probs = oracle_validation_probs
     args.Oracle_Fatigue_Sensitivity = oracle_fatigue_sensitivity
-    args.Oracle_Num = len(oracle_type)
     args.Malicious_Oracle_Index = malicious_index
     args.Normal_Oracle_Index = normal_index
     args.Trusted_Oracle_Index = trusted_index
+    args.Oracle_Num = len(oracle_type)

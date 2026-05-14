@@ -14,9 +14,22 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
+from dynamic_malicious_runtime import (
+    extract_dynamic_malicious_args,
+    attach_dynamic_malicious_args,
+    install_dynamic_malicious_training,
+)
+
+# Strip dynamic-malicious args before the original param_parser.py sees sys.argv.
+_dyn_args, _clean_argv = extract_dynamic_malicious_args(sys.argv)
+sys.argv = _clean_argv
+
 from env import SchedulingEnv
 from model import baseline_DQN, baseline_PPO, DuelingDoubleDQN, OptionActorCritic, baselines, BLOR
 from utils import get_args
+
+# Install dynamic malicious monkey-patch before environment construction.
+install_dynamic_malicious_training(SchedulingEnv)
 
 
 class Tee:
@@ -42,6 +55,7 @@ _arg_buf = io.StringIO()
 sys.stdout = _arg_buf
 sys.stderr = _arg_buf
 args = get_args()
+args = attach_dynamic_malicious_args(args, _dyn_args)
 sys.stdout, sys.stderr = _pre_stdout, _pre_stderr
 
 np.random.seed(args.Seed)
@@ -50,7 +64,8 @@ random.seed(args.Seed)
 now = datetime.now()
 tag = str(getattr(args, "Run_Tag", "")).strip()
 tag_part = f"_{tag}" if tag else ""
-RUN_ID = f"{now.year%100}_{now.month}_{now.day}_{now.hour:02d}_{now.minute:02d}_Epoch{args.Epoch}_Req{args.Request_Num}_{args.Scenario}_Seed{args.Seed}{tag_part}"
+dyn_part = "_DynMal" if getattr(args, "Dynamic_Malicious_Training", False) else ""
+RUN_ID = f"{now.year%100}_{now.month}_{now.day}_{now.hour:02d}_{now.minute:02d}_Epoch{args.Epoch}_Req{args.Request_Num}_{args.Scenario}_Seed{args.Seed}{dyn_part}{tag_part}"
 out_base = Path(args.Output_Dir)
 if not out_base.is_absolute():
     out_base = Path.cwd() / out_base
@@ -70,6 +85,178 @@ print(f"Current working directory: {Path.cwd().resolve()}")
 print(f"Run folder: {RUN_DIR}")
 print(f"Run log path: {RUN_TXT_PATH}")
 print(_arg_buf.getvalue(), end="")
+if getattr(args, "Dynamic_Malicious_Training", False):
+    print(
+        "[Dynamic malicious training] enabled: "
+        f"refresh={args.Dynamic_Malicious_Refresh}, "
+        f"refresh_periods={args.Dynamic_Malicious_Refresh_Periods}, "
+        f"ratio={args.Dynamic_Malicious_Ratio}, "
+        f"count={args.Dynamic_Malicious_Count}, "
+        f"strategy={args.Dynamic_Malicious_Strategy}, "
+        f"profile_strength={args.Dynamic_Malicious_Profile_Strength}"
+    )
+
+
+def _set_if_absent_or_lower(current, target):
+    """Compatibility helper kept for future CLI extension."""
+    try:
+        return float(current)
+    except Exception:
+        return float(target)
+
+
+def apply_dynamic_hcrl_adaptation(args):
+    """Success-oriented HCRL tuning for dynamic malicious-oracle training.
+
+    v4 balanced still tended to over-penalize audit/risk, which pushed HCRL into
+    low-quality backup selection and reduced final success rate. This v5 preset
+    makes final success, validation-aware success, and effective backup recovery
+    the dominant reward signals, while keeping a moderate malicious-oracle
+    penalty so the policy still avoids active attackers.
+    """
+    if not bool(getattr(args, "Dynamic_Malicious_Training", False)):
+        return args
+    if bool(getattr(args, "Disable_Dynamic_HCRL_Tune", False)):
+        print("[Dynamic HCRL tune] disabled")
+        return args
+
+    mode = str(getattr(args, "Dynamic_HCRL_Tune_Mode", "success")).lower()
+    if mode not in {"success", "balanced", "safe", "aggressive"}:
+        mode = "success"
+
+    # DQN teacher was trained in a different/non-dynamic regime and can bias HCRL
+    # toward fixed-oracle behavior. Keep it disabled for dynamic attackers.
+    args.HCRL_No_Teacher = True
+    args.HCRL_Teacher_Source = "none"
+    args.HCRL_Teacher_Start_Prob = 0.0
+    args.HCRL_Min_Teacher_Prob = 0.0
+    args.HCRL_Teacher_Guidance_Episodes = 0
+
+    # Slower malicious curriculum: v3 reached full attack by episode 5 and HCRL
+    # collapsed. These defaults let it learn useful backup/reputation evidence.
+    if not bool(getattr(args, "Disable_Dynamic_Malicious_Curriculum", False)):
+        args.Dynamic_Malicious_Start_Ratio = float(getattr(args, "Dynamic_Malicious_Start_Ratio", 0.06))
+        args.Dynamic_Malicious_Start_Strength = float(getattr(args, "Dynamic_Malicious_Start_Strength", 0.45))
+        args.Dynamic_Malicious_Warmup_Episodes = max(int(getattr(args, "Dynamic_Malicious_Warmup_Episodes", 18)), 18)
+
+    if mode == "success":
+        cfg = dict(
+            # Moderate risk: malicious avoidance remains meaningful, but it no
+            # longer dominates final success and validation-aware success.
+            risk_lambda=0.88, cost_lambda=0.55, risk_budget=0.085,
+            primary_mal_pen=0.95, backup_mal_pen=1.05, est_risk_pen=0.34,
+            # Do not punish backup merely for being used; punish low-value / bad
+            # recovery indirectly through final success and recovery signals.
+            backup_used_pen=0.025, unnecessary_pen=0.045, total_cost_pen=0.10,
+            # Looser backup gate to prevent backup_score collapse. This should
+            # increase effective recovery rather than forcing near-constant but
+            # low-quality backup behavior.
+            backup_min_score=0.055, backup_max_risk=0.62, backup_risk_margin=0.03,
+            backup_cost_cap=1.22, recovery_cost_cap=1.45,
+            # Main reward target: final success and useful backup recovery.
+            final_success=1.08, success_gain=1.05, primary_success=0.62,
+            backup_recovery=1.38, trusted_bonus=0.12, backup_trust=0.13,
+            # Audit remains useful, but lower its weight to avoid suppressing the
+            # whole oracle pool when attacks rotate dynamically.
+            audit_weight=0.22, audit_risk_rate=0.075, audit_fail_pen=0.045,
+            audit_reward_pen=0.16, low_truth=0.36, high_risk=0.70, cooldown=0.045,
+            entropy=0.075,
+            # Keep backup exploration longer so the backup branch can learn which
+            # alternatives truly recover failed primaries.
+            backup_guidance_eps=18, backup_start_prob=0.72, backup_min_prob=0.08,
+        )
+    elif mode == "aggressive":
+        cfg = dict(
+            risk_lambda=1.35, cost_lambda=0.90, risk_budget=0.055,
+            primary_mal_pen=1.35, backup_mal_pen=1.50, est_risk_pen=0.62,
+            backup_used_pen=0.10, unnecessary_pen=0.16, total_cost_pen=0.24,
+            backup_min_score=0.16, backup_max_risk=0.42, backup_risk_margin=0.08,
+            backup_cost_cap=1.02, recovery_cost_cap=1.20,
+            final_success=0.66, success_gain=0.72, primary_success=0.42,
+            backup_recovery=0.92, trusted_bonus=0.18, backup_trust=0.18,
+            audit_weight=0.36, audit_risk_rate=0.13, audit_fail_pen=0.09,
+            audit_reward_pen=0.34, low_truth=0.44, high_risk=0.60, cooldown=0.12,
+            entropy=0.07,
+            backup_guidance_eps=8, backup_start_prob=0.50, backup_min_prob=0.03,
+        )
+    elif mode == "safe":
+        cfg = dict(
+            risk_lambda=1.20, cost_lambda=0.78, risk_budget=0.065,
+            primary_mal_pen=1.20, backup_mal_pen=1.35, est_risk_pen=0.52,
+            backup_used_pen=0.06, unnecessary_pen=0.08, total_cost_pen=0.16,
+            backup_min_score=0.10, backup_max_risk=0.52, backup_risk_margin=0.05,
+            backup_cost_cap=1.10, recovery_cost_cap=1.30,
+            final_success=0.74, success_gain=0.82, primary_success=0.46,
+            backup_recovery=1.05, trusted_bonus=0.16, backup_trust=0.17,
+            audit_weight=0.28, audit_risk_rate=0.11, audit_fail_pen=0.07,
+            audit_reward_pen=0.24, low_truth=0.40, high_risk=0.64, cooldown=0.08,
+            entropy=0.06,
+            backup_guidance_eps=10, backup_start_prob=0.58, backup_min_prob=0.04,
+        )
+    else:  # balanced, recommended default
+        cfg = dict(
+            risk_lambda=1.15, cost_lambda=0.80, risk_budget=0.065,
+            primary_mal_pen=1.15, backup_mal_pen=1.28, est_risk_pen=0.50,
+            backup_used_pen=0.07, unnecessary_pen=0.10, total_cost_pen=0.18,
+            backup_min_score=0.12, backup_max_risk=0.50, backup_risk_margin=0.06,
+            backup_cost_cap=1.08, recovery_cost_cap=1.25,
+            final_success=0.72, success_gain=0.78, primary_success=0.44,
+            backup_recovery=0.98, trusted_bonus=0.16, backup_trust=0.16,
+            audit_weight=0.30, audit_risk_rate=0.12, audit_fail_pen=0.08,
+            audit_reward_pen=0.28, low_truth=0.42, high_risk=0.62, cooldown=0.10,
+            entropy=0.06,
+            backup_guidance_eps=8, backup_start_prob=0.50, backup_min_prob=0.03,
+        )
+
+    args.HCRL_Backup_Guidance_Episodes = int(cfg["backup_guidance_eps"])
+    args.HCRL_Backup_Start_Prob = float(cfg["backup_start_prob"])
+    args.HCRL_Backup_Min_Prob = float(cfg["backup_min_prob"])
+
+    args.HCRL_Primary_Malicious_Penalty = float(cfg["primary_mal_pen"])
+    args.HCRL_Backup_Malicious_Penalty = float(cfg["backup_mal_pen"])
+    args.HCRL_Estimated_Risk_Penalty = float(cfg["est_risk_pen"])
+    args.HCRL_Lambda_Risk = float(cfg["risk_lambda"])
+    args.HCRL_Risk_Budget = float(cfg["risk_budget"])
+
+    args.HCRL_Backup_Used_Penalty = float(cfg["backup_used_pen"])
+    args.HCRL_Unnecessary_Backup_Penalty = float(cfg["unnecessary_pen"])
+    args.HCRL_Total_Cost_Penalty = float(cfg["total_cost_pen"])
+    args.HCRL_Lambda_Cost = float(cfg["cost_lambda"])
+    args.HCRL_Safety_Min_Backup_Score = float(cfg["backup_min_score"])
+    args.HCRL_Backup_Max_Estimated_Risk = float(cfg["backup_max_risk"])
+    args.HCRL_Backup_Risk_Margin = float(cfg["backup_risk_margin"])
+    args.HCRL_Backup_Cost_Cap = float(cfg["backup_cost_cap"])
+    args.HCRL_Recovery_Cost_Hard_Cap = float(cfg["recovery_cost_cap"])
+
+    args.HCRL_Final_Success_Bonus = float(cfg["final_success"])
+    args.HCRL_Success_Gain_Bonus = float(cfg["success_gain"])
+    args.HCRL_Primary_Success_Bonus = float(cfg["primary_success"])
+    args.HCRL_Backup_Recovery_Bonus = float(cfg["backup_recovery"])
+    args.HCRL_Trusted_Selection_Bonus = float(cfg["trusted_bonus"])
+    args.HCRL_Backup_Trust_Bonus = float(cfg["backup_trust"])
+
+    args.Audit_Weight_In_Reputation = float(cfg["audit_weight"])
+    args.Audit_Risk_Rate = float(cfg["audit_risk_rate"])
+    args.Audit_Fail_Penalty = float(cfg["audit_fail_pen"])
+    args.Audit_Risk_Reward_Penalty = float(cfg["audit_reward_pen"])
+    args.Audit_Low_Truth_Threshold = float(cfg["low_truth"])
+    args.Audit_High_Risk_Threshold = float(cfg["high_risk"])
+    args.Audit_Cooldown_Penalty = float(cfg["cooldown"])
+
+    args.HCRL_AC_Entropy = max(float(getattr(args, "HCRL_AC_Entropy", 0.05)), float(cfg["entropy"]))
+    args.Dqn_memory_size = max(int(getattr(args, "Dqn_memory_size", 3000)), 6000)
+
+    print(f"[Dynamic HCRL tune] enabled mode={mode}: success-oriented reward, no DQN teacher")
+    print(
+        f"[Dynamic HCRL tune] risk_lambda={args.HCRL_Lambda_Risk}, cost_lambda={args.HCRL_Lambda_Cost}, "
+        f"success_bonus={args.HCRL_Final_Success_Bonus}, recovery_bonus={args.HCRL_Backup_Recovery_Bonus}, "
+        f"backup_used_penalty={args.HCRL_Backup_Used_Penalty}, backup_min_score={args.HCRL_Safety_Min_Backup_Score}, "
+        f"audit_weight={args.Audit_Weight_In_Reputation}, warmup={getattr(args, 'Dynamic_Malicious_Warmup_Episodes', 'NA')}"
+    )
+    return args
+
+
+args = apply_dynamic_hcrl_adaptation(args)
 
 
 def build_models(env, args):
@@ -183,6 +370,9 @@ def summarize_episode(env, args, startP, episode=None):
                 f"serial_mode_rate: {env.get_totalHCRLSerialModeRate(args.Baseline_num, startP)[idx] * 100:.2f}% "
                 f"parallel_mode_rate: {env.get_totalHCRLParallelModeRate(args.Baseline_num, startP)[idx] * 100:.2f}%"
             )
+    if getattr(args, "Dynamic_Malicious_Training", False):
+        active = getattr(env, "active_malicious_oracles", [])
+        print(f"[Dynamic malicious diagnostics] generation={getattr(env, 'dynamic_malicious_generation', -1)} active={active}")
 
 
 def collect_final_results(env, args, startP):
@@ -221,14 +411,17 @@ def collect_final_results(env, args, startP):
 
 
 # Main experiment.
+args.Dynamic_Malicious_Current_Episode = 0
 env = SchedulingEnv(args)
 brain = build_models(env, args)
 flags = {"cobra": False, "hcrl": False}
 eval_start = min(2000, max(0, args.Request_Num // 2))
 last_results = None
+last_dynamic_history = []
 
 for episode in range(args.Epoch):
     print(f"----------------------------Episode {episode} ----------------------------")
+    args.Dynamic_Malicious_Current_Episode = int(episode)
     env.reset(args)
     env.reset_reputation_factors()
     env.initial_reputation()
@@ -241,12 +434,15 @@ for episode in range(args.Epoch):
     blor_c = 1
     performance_c = 0
     global_step = 0
+
     while True:
         if request_c % args.Time_Period_Size == 0:
             time_period += 1
             for policy_name in args.Baselines:
                 env.update_reputation(env.get_reputation_factors(policy_name), time_period, policy_name)
             env.reset_reputation_factors()
+            if hasattr(env, "maybe_refresh_dynamic_malicious"):
+                env.maybe_refresh_dynamic_malicious(trigger="period", time_period=time_period, request_id=request_c)
 
         global_step += 1
         finish, request_attrs = env.workload(request_c)
@@ -348,7 +544,7 @@ for episode in range(args.Epoch):
         if "HCRL-Oracle" in args.Baselines:
             s_primary = env.getState(request_attrs, "HCRL-Oracle")
             primary_mask = env.get_action_mask(request_attrs)
-            # Primary selection, teacher-guided early.
+
             teacher_action = None
             if not args.HCRL_No_Teacher and episode < args.HCRL_Teacher_Guidance_Episodes:
                 teacher = brain.get(args.HCRL_Teacher_Source)
@@ -386,7 +582,6 @@ for episode in range(args.Epoch):
                 else:
                     backup_action = brain["HCRL_Backup"].choose_action(s_primary, backup_mask)
 
-            # Store previous transitions with current states.
             if "HCRL_Mode" in last:
                 brain["HCRL_Mode"].store_transition(last["HCRL_Mode"][0], last["HCRL_Mode"][1], last["HCRL_Mode"][2], s_mode, mode_mask, last["HCRL_Mode"][3])
             if "HCRL_Primary" in last:
@@ -401,6 +596,7 @@ for episode in range(args.Epoch):
                 brain["HCRL_Primary"].learn()
             if global_step > args.HCRL_start_learn and global_step % args.HCRL_Backup_learn_interval == 0:
                 brain["HCRL_Backup"].learn()
+
             last["HCRL_Mode"] = (s_mode, mode_action, feedback["mode_reward"], mode_mask)
             last["HCRL_Primary"] = (s_primary, primary_action, feedback["primary_reward"], primary_mask)
             if mode_name not in ["single_cost", "single_safe"] and backup_action >= 0:
@@ -415,13 +611,25 @@ for episode in range(args.Epoch):
 
     summarize_episode(env, args, eval_start, episode)
     last_results = collect_final_results(env, args, eval_start)
+    if getattr(args, "Dynamic_Malicious_Training", False):
+        last_dynamic_history = list(getattr(env, "dynamic_malicious_history", []))
 
 # Save final results.
 if last_results is None:
     last_results = collect_final_results(env, args, eval_start)
+
 pd.DataFrame(last_results).to_csv(RUN_CSV_PATH, index=False, encoding="utf-8-sig")
+json_payload = {
+    "run_id": RUN_ID,
+    "args": vars(args),
+    "results": last_results,
+}
+if getattr(args, "Dynamic_Malicious_Training", False):
+    json_payload["dynamic_malicious_history_last_episode"] = last_dynamic_history
+    json_payload["dynamic_malicious_final_active"] = list(getattr(env, "active_malicious_oracles", []))
 with open(RUN_JSON_PATH, "w", encoding="utf-8") as f:
-    json.dump({"run_id": RUN_ID, "args": vars(args), "results": last_results}, f, ensure_ascii=False, indent=2, default=str)
+    json.dump(json_payload, f, ensure_ascii=False, indent=2, default=str)
+
 print(f"Saved final results CSV: {RUN_CSV_PATH}")
 print(f"Saved final results JSON: {RUN_JSON_PATH}")
 
