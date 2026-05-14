@@ -1,10 +1,30 @@
-﻿# TCO-DRL 方法说明 README
+# TCO-DRL with HCRL-Oracle：面向区块链预言机选择的层次化约束强化学习框架
 
-> Trust-Aware and Cost-Optimized Blockchain Oracle Selection with Deep Reinforcement Learning
+> **Trust-aware and Cost-optimized Blockchain Oracle Selection with Hierarchical Constrained Reinforcement Learning**
 
-本仓库面向区块链预言机（Blockchain Oracle）选择问题：在一组具有不同服务类型、成本、处理速度、质押代币、信誉、验证成功率和潜在恶意行为风险的预言机中，为连续到达的请求选择合适的预言机或预言机组合，使系统在满足服务类型与截止时间约束的同时，尽可能提高任务成功率、降低响应时间、降低成本并减少恶意预言机风险。
+本仓库围绕区块链预言机（Blockchain Oracle）选择问题展开：在连续到达的请求流中，系统需要从一组异构预言机中选择合适的执行节点，或选择“主预言机 + 备份预言机”的组合，使任务在满足服务类型与截止时间约束的同时，尽可能提高验证成功率、降低响应时间、降低调用成本，并减少恶意或不可靠预言机被分配的概率。
 
-本 README 重点说明仓库中各类方法的含义、适用场景和运行方式，便于读者理解不同 baseline 与改进方法之间的区别。
+当前版本的核心方法是 **HCRL-Oracle**，即 **Hierarchical Constrained Reinforcement Learning for Oracle Selection**。该方法将传统的“选择一个预言机”问题扩展为“选择执行模式、选择主预言机、选择备份预言机”的层次化决策问题，并进一步引入审计感知声誉修正、图结构预言机编码和成本—延迟—风险约束优化。
+
+---
+
+## 目录
+
+- [1. 仓库结构](#1-仓库结构)
+- [2. 问题定义](#2-问题定义)
+- [3. 方法总览](#3-方法总览)
+- [4. HCRL-Oracle 算法设计](#4-hcrl-oracle-算法设计)
+- [5. HCRL 的状态建模](#5-hcrl-的状态建模)
+- [6. 审计感知声誉机制](#6-审计感知声誉机制)
+- [7. 图结构预言机编码器](#7-图结构预言机编码器)
+- [8. 层次化策略与执行模式](#8-层次化策略与执行模式)
+- [9. 成本—延迟—风险约束奖励](#9-成本延迟风险约束奖励)
+- [10. HCRL 与其他方法的对比](#10-hcrl-与其他方法的对比)
+- [11. 安装与运行](#11-安装与运行)
+- [12. 复现实验命令](#12-复现实验命令)
+- [13. 消融实验](#13-消融实验)
+- [14. 输出文件与指标解释](#14-输出文件与指标解释)
+- [15. 推荐实验设置](#15-推荐实验设置)
 
 ---
 
@@ -12,431 +32,853 @@
 
 ```text
 TCO-DRL/
-├── TCO-DRL_with baseline/          # 仿真实验主代码：环境、模型、参数、结果输出
-│   ├── main.py                     # 训练与评估入口
-│   ├── env.py                      # 预言机选择仿真环境
-│   ├── model.py                    # Random/RR/Earliest/SemiGreedy/BLOR/DQN/PPO/RA-DDQN/HCRL 等模型
-│   ├── param_parser.py             # 所有实验参数与方法开关
-│   ├── utils.py                    # 参数解析与辅助函数
-│   └── output/                     # 每次实验自动生成的日志、结果表和模型参数
-├── TCO-DRL_on blockchain/          # Ethereum/Ganache/Truffle 区块链部署版本
-│   ├── contracts/                  # 智能合约
-│   ├── build/contracts/            # 编译后的合约 ABI/JSON
-│   └── python project/             # 与链上合约交互的 Python 代码
-├── TCO-DRL_update smart contracts/ # 更新版智能合约相关代码
-└── scripts/                        # PowerShell 一键运行脚本：quick test、COBRA、HCRL、消融、多种子实验
+├── README.md
+├── TCO-DRL_with baseline/
+│   ├── main.py                     # 训练与评估主入口
+│   ├── env.py                      # 预言机选择仿真环境与 HCRL 反馈逻辑
+│   ├── model.py                    # DQN、PPO、RA-DDQN、Option Actor-Critic 等模型
+│   ├── param_parser.py             # 方法选择、场景配置与超参数定义
+│   ├── utils.py                    # 参数解析辅助函数
+│   ├── scripts/                    # 一键运行实验脚本
+│   ├── tools/                      # 实验结果汇总工具
+│   └── output/                     # 自动保存日志、结果表和模型权重
+├── TCO-DRL_on blockchain/          # 区块链部署相关代码
+└── TCO-DRL_update smart contracts/ # 智能合约更新相关代码
+```
+
+主要仿真实验代码位于：
+
+```text
+TCO-DRL_with baseline/
 ```
 
 ---
 
 ## 2. 问题定义
 
-给定一个连续到达的请求序列，每个请求包含服务类型、到达时间、任务长度和截止时间。系统中存在多个预言机，每个预言机具有：
+### 2.1 区块链预言机选择任务
 
-- **Service type**：可以处理的请求类型；
-- **Cost**：调用成本；
-- **Accuracy / processing speed**：处理能力或执行速度；
-- **Token / stake**：质押代币，可作为可信先验；
-- **Validation probability**：返回结果被验证为正确的概率；
-- **Behavior probability**：正常、延迟、异常或恶意行为概率；
-- **Reputation**：根据历史表现动态更新的信誉；
-- **Load / idle time**：当前负载与等待时间。
+考虑一个连续到达的请求序列：
 
-目标是在每个请求到达时选择一个预言机，或选择“主预言机 + 备份预言机/委员会模式”，以优化以下指标：
+$$
+\mathcal{R}=\{r_1,r_2,\ldots,r_T\}.
+$$
 
-- 总奖励（total reward）；
-- 平均响应时间（average response time）；
-- 成功率（success rate）；
-- 截止时间内成功率（success-in-time rate）；
-- 总完成时间（finish time）；
-- 总成本（cost）；
-- 服务类型匹配率（match rate）；
-- 恶意/正常/可信预言机分配数量；
-- 对 primary-backup 方法，还统计 backup 使用率、backup 恢复率、跳过 backup 比例等诊断指标；
-- 对 HCRL，还统计 single/serial/parallel 模式比例，以及 cost/latency/risk 约束违反情况。
+每个请求 $r_t$ 由以下属性描述：
+
+$$
+r_t = (\tau_t, a_t, \ell_t, d_t),
+$$
+
+其中：
+
+- $\tau_t$ 表示请求类型；
+- $a_t$ 表示请求到达时间；
+- $\ell_t$ 表示任务长度；
+- $d_t$ 表示截止时间约束。
+
+系统中存在 $N$ 个候选预言机：
+
+$$
+\mathcal{O}=\{o_1,o_2,\ldots,o_N\}.
+$$
+
+每个预言机 $o_i$ 具有服务类型、成本、处理能力、质押代币、验证概率、行为风险、历史信誉和当前负载等属性：
+
+$$
+o_i = (\tau_i, c_i, v_i, q_i, p_i^{val}, p_i^{beh}, rep_i, load_i).
+$$
+
+调度器需要在每个请求到达时选择一个执行动作。对于单预言机方法，动作是：
+
+$$
+a_t \in \{1,2,\ldots,N\}.
+$$
+
+对于 HCRL-Oracle，动作被拆分为层次化三元组：
+
+$$
+a_t^{HCRL} = (m_t, p_t, b_t),
+$$
+
+其中：
+
+- $m_t$ 表示高层执行模式；
+- $p_t$ 表示主预言机；
+- $b_t$ 表示备份预言机，若当前模式不需要备份，则 $b_t=-1$。
+
+### 2.2 优化目标
+
+系统的总体目标是在长期请求序列上最大化累计收益：
+
+$$
+\max_\pi \; \mathbb{E}_{\pi}\left[\sum_{t=1}^{T}\gamma^{t-1} r_t\right],
+$$
+
+其中 $\pi$ 为调度策略，$\gamma$ 为折扣因子。奖励函数不仅关注任务是否成功，还综合考虑：
+
+- 验证成功率；
+- 截止时间内成功率；
+- 响应时间；
+- 调用成本；
+- 恶意预言机分配率；
+- 备份恢复能力；
+- 审计后的可信程度；
+- 成本、延迟和风险预算约束。
+
+因此，该问题并不是简单的最短队列调度或最低成本选择，而是一个带有隐藏风险、非平稳可靠性和约束优化目标的序列决策问题。
 
 ---
 
 ## 3. 方法总览
 
-| 方法 | 类型 | 是否学习 | 是否考虑信誉 | 是否考虑成本 | 是否支持 backup | 核心作用 |
-|---|---|---:|---:|---:|---:|---|
-| Random | 基础 baseline | 否 | 否 | 否 | 否 | 随机选择预言机，作为最低基准 |
-| Round-Robin | 基础 baseline | 否 | 否 | 否 | 否 | 按顺序轮询预言机，测试公平分配效果 |
-| Earliest | 启发式 baseline | 否 | 间接 | 否 | 否 | 选择最早可用/等待时间最短的预言机 |
-| BLOR | Bayesian bandit baseline | 部分 | 是 | 是 | 否 | 基于成功/失败历史估计可靠性，并加入成本惩罚 |
-| SemiGreedy | 贪心 baseline | 否 | 取决于 reward | 是 | 否 | 基于当前即时 reward 和 cost 的一步贪心选择 |
-| DQN / TCO-DRL | 深度强化学习 | 是 | 是 | 是 | 否 | 原始 TCO-DRL 主方法，学习长期 oracle selection 策略 |
-| PPO | 策略梯度 RL baseline | 是 | 是 | 是 | 否 | 使用随机策略进行选择，作为 DQN 的策略梯度对照 |
-| RA-DDQN | 风险感知 DDQN | 是 | 是 | 是 | 否 | 使用 Dueling Double DQN 降低 Q 值高估并增强风险感知 |
-| PB-SafeDQN | Primary-backup 安全选择 | 是 | 是 | 是 | 是 | Dueling DDQN 选主预言机，规则型安全模块选备份 |
-| COBRA-Oracle | 成本约束恢复感知 RL | 是 | 是 | 是 | 是 | teacher-guided primary selector + adaptive constrained backup gate |
-| HCRL-Oracle | 层次化约束 RL | 是 | 是 | 是 | 是 | 学习 single/serial/parallel 模式、主预言机和备份预言机 |
+当前代码支持以下方法。
+
+| 方法 | 类型 | 是否学习 | 是否支持备份 | 是否显式考虑风险 | 核心思想 |
+|---|---|---:|---:|---:|---|
+| `Random` | 随机基线 | 否 | 否 | 否 | 在候选预言机中随机选择。 |
+| `Round-Robin` | 轮询基线 | 否 | 否 | 否 | 按固定顺序循环选择预言机。 |
+| `Earliest` | 启发式基线 | 否 | 否 | 间接 | 选择最早空闲或等待时间最短的预言机。 |
+| `BLOR` | Bayesian bandit | 部分 | 否 | 间接 | 基于历史成功/失败记录估计可靠性并加入成本惩罚。 |
+| `SemiGreedy` | 贪心基线 | 否 | 否 | 间接 | 根据当前即时收益和成本进行一步贪心选择。 |
+| `DQN` | 深度强化学习 | 是 | 否 | 间接 | 学习单预言机选择的长期 Q 值。 |
+| `PPO` | 策略梯度 RL | 是 | 否 | 间接 | 学习随机策略形式的单预言机选择器。 |
+| `RA-DDQN` | 风险感知 DDQN | 是 | 否 | 是 | 使用 Dueling Double DQN 提高稳定性并适配风险奖励。 |
+| `PB-SafeDQN` | Primary-backup RL | 是 | 是 | 是 | RL 选择主预言机，规则模块选择备份预言机。 |
+| `COBRA-Oracle` | 约束恢复感知 RL | 是 | 是 | 是 | Teacher-guided primary selector + adaptive backup gate。 |
+| `HCRL-Oracle` | 层次化约束 RL | 是 | 是 | 是 | 同时学习执行模式、主预言机和备份预言机。 |
+
+其中，**HCRL-Oracle 是当前版本的主方法**，其设计目标是在困难场景下实现更稳健的安全调度。
 
 ---
 
-## 4. 各个方法说明
+## 4. HCRL-Oracle 算法设计
 
-### 4.1 Random
+### 4.1 设计动机
 
-**Random** 是最简单的随机基线方法。对于每个请求，它在所有预言机中均匀随机选择一个预言机执行任务。
+传统预言机选择方法通常只回答一个问题：
 
-该方法不使用请求类型、成本、信誉、历史成功率或负载信息，因此主要用于判断其他方法是否显著优于随机选择。
+> 当前请求应该交给哪个预言机？
 
-**特点：**
+然而，在更真实的区块链预言机环境中，这一问题往往过于简化。原因包括：
 
-- 不需要训练；
-- 不使用状态信息；
-- 不考虑服务类型匹配；
-- 不考虑信誉、成本和风险；
-- 适合作为最低性能参考。
+1. **低成本预言机可能是风险诱饵**：某些节点成本较低，但验证概率低或恶意行为概率高；
+2. **历史信誉并不完全可靠**：节点可能通过短期正常行为积累信誉，然后在高负载或关键请求中作恶；
+3. **可靠性具有非平稳性**：在 `rl_hard` 和 `rl_harder` 场景中，节点过度使用会导致疲劳效应，验证概率下降；
+4. **备份机制存在成本—安全权衡**：无条件使用备份会提高成本，完全不用备份会提高失败风险；
+5. **串行备份与并行备份适用场景不同**：串行备份节省成本但可能增加延迟，并行备份提高安全性但成本更高。
 
----
+因此，HCRL-Oracle 不再将问题建模为单层动作选择，而是引入层次化控制结构：
 
-### 4.2 Round-Robin
+$$
+\pi_{HCRL}(a_t|s_t)=
+\pi_m(m_t|s_t^m)\cdot
+\pi_p(p_t|s_t^p)\cdot
+\pi_b(b_t|s_t^b,m_t,p_t).
+$$
 
-**Round-Robin** 按照固定顺序循环选择预言机。第 1 个请求选择第 1 个预言机，第 2 个请求选择第 2 个预言机，以此类推，超过预言机数量后重新从第 1 个开始。
+其中：
 
-该方法可以避免单个预言机被过度使用，但它不根据任务类型、信誉、成本或实时负载做自适应调整。
+- $\pi_m$ 是高层模式策略；
+- $\pi_p$ 是主预言机策略；
+- $\pi_b$ 是备份预言机策略；
+- $s_t^m$、$s_t^p$、$s_t^b$ 分别表示模式、主预言机和备份预言机使用的状态表示。
 
-**特点：**
+这种设计使模型能够自适应地决定：
 
-- 不需要训练；
-- 分配较均匀；
-- 不考虑当前请求类型；
-- 不考虑预言机可靠性；
-- 适合作为简单公平调度 baseline。
+- 什么时候只使用单个预言机；
+- 什么时候需要串行备份；
+- 什么时候需要并行安全冗余；
+- 哪个节点适合作为主节点；
+- 哪个节点适合作为备份节点。
 
----
+### 4.2 HCRL 的三个策略模块
 
-### 4.3 Earliest
-
-**Earliest** 选择当前最早可用或等待时间最短的预言机。它关注系统排队与响应时间，试图减少请求等待。
-
-该方法对降低短期等待时间有帮助，但可能选择低信誉、高成本或服务类型不匹配的预言机，因此在 validation-aware 或 risk-aware 场景中可能不稳定。
-
-**特点：**
-
-- 不需要训练；
-- 主要优化短期等待时间；
-- 不显式优化信誉和成本；
-- 适合与 RL 方法比较“短视时间优化”和“长期收益优化”的差异。
-
----
-
-### 4.4 BLOR
-
-**BLOR** 是一个 Bayesian bandit 风格的 oracle selection baseline。它根据每个预言机历史成功次数和失败次数构建 Beta 后验分布，采样得到可靠性估计，并加入成本惩罚项：
+在当前代码实现中，HCRL-Oracle 由三个可学习模块组成：
 
 ```text
-score = sampled_reliability - cost_weight * oracle_cost
+HCRL_Mode
+HCRL_Primary
+HCRL_Backup
 ```
 
-得分最高的预言机会被选中。该方法比 Random/Round-Robin 更关注历史表现，也比纯贪心更具有探索性。
+对应关系如下：
 
-**特点：**
+| 模块 | 策略符号 | 动作空间 | 功能 |
+|---|---|---:|---|
+| `HCRL_Mode` | $\pi_m$ | 执行模式数量 | 选择 single / serial / parallel 等高层模式。 |
+| `HCRL_Primary` | $\pi_p$ | 预言机数量 $N$ | 选择主预言机。 |
+| `HCRL_Backup` | $\pi_b$ | 预言机数量 $N$ | 在需要备份时选择备份预言机。 |
 
-- 使用历史成功/失败反馈；
-- 用 Beta 后验近似预言机可靠性；
-- 通过 cost penalty 控制高成本预言机；
-- 不使用深度神经网络；
-- 适合作为非深度学习的自适应 baseline。
+三个模块均采用轻量级 **Option Actor-Critic** 风格实现。对于任意策略 $\pi_\theta$，actor 输出动作分布，critic 估计状态价值：
 
----
+$$
+\pi_\theta(a|s)=\mathrm{Softmax}(f_\theta(s)),
+$$
 
-### 4.5 SemiGreedy
+$$
+V_\phi(s)=g_\phi(s).
+$$
 
-**SemiGreedy** 是一步贪心式启发方法。它先根据当前请求和候选预言机计算即时 reward 与 cost，然后在高 reward 候选中选择成本较低的预言机。
+策略更新可以抽象表示为：
 
-该方法可以在静态或简单环境中取得较好表现，但它只关注当前请求，不建模未来信誉变化、负载积累或验证概率衰减，因此在 rl_hard / rl_harder 等非平稳场景中容易陷入“低成本但高风险”的选择。
+$$
+\nabla_\theta J(\theta)
+=\mathbb{E}\left[\nabla_\theta \log \pi_\theta(a_t|s_t) A_t\right]
++ \beta \nabla_\theta \mathcal{H}(\pi_\theta),
+$$
 
-**特点：**
+其中：
 
-- 不需要训练；
-- 计算当前即时 reward；
-- 在近似最优 reward 候选中偏向低成本；
-- 属于 myopic 策略；
-- 可作为 RL 是否学到长期策略的对照。
+- $A_t$ 为优势函数；
+- $\mathcal{H}(\pi_\theta)$ 为策略熵；
+- $\beta$ 为熵正则系数，对应代码中的 `HCRL_AC_Entropy`。
 
----
+critic 的目标是最小化价值估计误差：
 
-### 4.6 DQN / TCO-DRL
+$$
+\mathcal{L}_V = \left(V_\phi(s_t)-\hat{R}_t\right)^2.
+$$
 
-**DQN** 是原始 TCO-DRL 的主要深度强化学习方法。系统将 oracle selection 建模为序列决策问题：
-
-- **State**：请求类型、请求长度、截止时间、各预言机等待时间、信誉、成本、验证历史等信息；
-- **Action**：选择一个预言机；
-- **Reward**：由响应时间、成本、信誉、服务类型匹配和成功情况构成；
-- **Policy**：通过 Q-learning 学习在不同状态下选择哪个预言机。
-
-在默认设置中，DQN 对应原始 TCO-DRL 单预言机选择策略。在增强场景中，它可以结合 enhanced state、risk-aware reward 和 action mask 进行更稳健的训练。
-
-**特点：**
-
-- 学习长期回报，而非只看当前请求；
-- 支持 replay buffer 和 target network；
-- 可使用 action mask 限制只选择服务类型匹配的预言机；
-- 是后续 RA-DDQN、PB-SafeDQN、COBRA 和 HCRL 的基础对照方法。
+代码中通过 `HCRL_AC_Value_Coef` 控制价值损失在更新中的权重。
 
 ---
 
-### 4.7 PPO
+## 5. HCRL 的状态建模
 
-**PPO** 是策略梯度类强化学习 baseline。与 DQN 学习 Q 值不同，PPO 直接学习一个随机策略，即在给定状态下输出每个预言机被选择的概率。
+### 5.1 请求级状态
 
-仓库中的 PPO 是轻量级、稳定版实现，主要用于作为 DQN 类方法的策略梯度对照。它支持 action mask、reward clipping、return normalization 和概率裁剪，以减少数值不稳定。
+对于请求 $r_t$，模型首先使用请求类型、任务长度和截止时间构成请求级上下文：
 
-**特点：**
+$$
+x_t^{req} =
+\left[
+\frac{\tau_t}{\tau_{max}},
+\frac{\ell_t}{\bar{\ell}},
+\frac{d_t}{d_{hard}}
+\right].
+$$
 
-- 学习随机策略；
-- 适合作为 DQN 的对照；
-- 可使用 action mask；
-- 对连续训练和复杂 reward 更稳定；
-- 通常不是本仓库最强主方法，而是重要 RL baseline。
+其中 $d_{hard}$ 对应困难场景中的 deadline 标准化常数。
 
----
+### 5.2 预言机级状态
 
-### 4.8 RA-DDQN
+对于每个预言机 $o_i$，代码构造一组 oracle feature：
 
-**RA-DDQN** 是 Risk-Aware Dueling Double DQN。它在 DQN 的基础上加入两个重要改进：
+$$
+x_{t,i}^{oracle}=\left[
+wait_i,
+rep_i^{eff},
+cost_i,
+acc_i,
+match_i,
+val_i,
+load_i,
+riskdelay_i,
+token_i,
+truth_i,
+fail_i^{audit},
+cooldown_i
+\right].
+$$
 
-1. **Double DQN**：缓解标准 DQN 对动作价值的过高估计；
-2. **Dueling network**：将状态价值和动作优势分开建模，使模型更容易判断“当前状态本身好不好”以及“哪个动作更好”。
+各项含义如下：
 
-在 validation_stress、rl_hard 和 rl_harder 场景中，RA-DDQN 更适合作为风险感知的单预言机选择方法。
+| 特征 | 含义 |
+|---|---|
+| $wait_i$ | 当前请求到达时，预言机 $i$ 的归一化等待时间。 |
+| $rep_i^{eff}$ | 审计修正后的有效信誉。 |
+| $cost_i$ | 归一化调用成本。 |
+| $acc_i$ | 归一化处理能力。 |
+| $match_i$ | 预言机服务类型是否与请求类型匹配。 |
+| $val_i$ | 验证成功概率或历史验证成功估计。 |
+| $load_i$ | 近期负载水平。 |
+| $riskdelay_i$ | 行为风险与延迟风险的混合估计。 |
+| $token_i$ | 归一化质押代币。 |
+| $truth_i$ | 审计后验可信度。 |
+| $fail_i^{audit}$ | 审计失败率估计。 |
+| $cooldown_i$ | 审计冷却惩罚状态。 |
 
-**特点：**
+因此，增强状态可以写为：
 
-- 比普通 DQN 更稳定；
-- 更适合风险感知 reward；
-- 仍然是单预言机选择；
-- 不直接引入 backup，但可作为 COBRA/HCRL 的 teacher。
+$$
+s_t^p = \left[x_t^{req}, x_{t,1}^{oracle},x_{t,2}^{oracle},\ldots,x_{t,N}^{oracle}\right].
+$$
 
----
+该状态用于主预言机策略 $\pi_p$ 和备份预言机策略 $\pi_b$。
 
-### 4.9 PB-SafeDQN
+### 5.3 模式策略状态
 
-**PB-SafeDQN** 是 primary-backup 风格的安全选择方法。它使用 Dueling Double DQN 选择主预言机（primary oracle），当主预言机失败或风险较高时，使用规则型安全模块选择同类型备份预言机（backup oracle）。
+HCRL 的模式策略不仅使用基础状态，还额外加入全局风险摘要特征：
 
-备份预言机的选择综合考虑：
+$$
+s_t^m = [s_t^p, z_t],
+$$
 
-- 最近成功率；
-- 信誉；
-- 当前负载；
-- 成本；
-- 质押代币；
-- 行为风险；
-- 延迟估计。
+其中 $z_t$ 包含：
 
-PB-SafeDQN 可以设置 backup 模式：
+$$
+z_t = [
+slack_t,
+risk_t^p,
+ontime_t^p,
+score_t^b,
+gain_t^b,
+pressure_t^c,
+succ_t^{recent},
+risk_t^{recent},
+fail_t^{audit},
+truth_t^{best\_backup}
+].
+$$
 
-- **serial**：主预言机失败后再调用 backup；
-- **parallel**：backup 作为 warm-standby 并行准备，降低恢复延迟；
-- **always trigger**：主预言机失败就使用 backup；
-- **cost-aware trigger**：只有当 backup 的预期收益超过成本和风险时才启用。
+这些特征分别表示：
 
-**特点：**
+- primary deadline slack；
+- primary estimated risk；
+- primary on-time probability；
+- best backup score；
+- backup gain；
+- backup cost pressure；
+- recent success rate；
+- recent risk level；
+- recent audit failure rate；
+- best backup audit truth score。
 
-- 主预言机由 RL 学习；
-- 备份预言机由可解释规则选择；
-- 可以提高 failure recovery；
-- 适合高风险、高验证失败率场景；
-- 是 COBRA-Oracle 的重要前置版本。
-
----
-
-### 4.10 COBRA-Oracle
-
-**COBRA-Oracle** 可以理解为 PB-SafeDQN 的进一步强化版本，全称可写作 **Cost-Bounded Recovery-Aware Oracle Selection**。它保留 primary-backup 架构，但重点改进了三个方面：
-
-1. **Teacher-guided primary selection**  
-   早期训练阶段可以从 DQN 或 RA-DDQN 复制参数，并以逐渐衰减的概率跟随 teacher action，避免 primary selector 初期过弱。
-
-2. **Adaptive backup gate**  
-   backup 是否启用不再只依赖固定阈值，而是基于最近 backup utility 的均值和标准差动态调整阈值：
-
-   ```text
-   adaptive_threshold = max(min_backup_score, recent_mean + alpha * recent_std)
-   ```
-
-3. **Constrained reward**  
-   同时考虑成本、延迟和恶意风险预算，通过 lambda penalty 控制违反约束的行为。
-
-**特点：**
-
-- 使用 Dueling Double DQN 作为 primary selector；
-- 支持 DQN 或 RA-DDQN teacher warm-start；
-- 使用 adaptive gate 控制 backup 使用频率；
-- 将 cost、latency、risk 作为软约束；
-- 目标是在高成功率和低冗余成本之间取得平衡；
-- 是本仓库中 primary-backup 方向的核心改进方法。
-
----
-
-### 4.11 HCRL-Oracle
-
-**HCRL-Oracle** 是 Hierarchical Constrained Reinforcement Learning for Oracle Selection。它不再只判断“是否需要 backup”，而是将 oracle selection 拆成层次化决策：
-
-1. **High-level mode policy**：选择执行模式；
-   - `single`：只使用一个主预言机；
-   - `serial`：主预言机失败后串行调用 backup；
-   - `parallel`：主预言机和 backup 并行或 warm-standby 执行。
-
-2. **Primary selector**：选择主预言机；
-3. **Backup selector**：在需要 backup 时选择备份预言机。
-
-HCRL 使用 Option Actor-Critic 风格的轻量级 actor-critic 策略分别学习 mode、primary 和 backup 三个子策略。它还支持：
-
-- teacher warm-start；
-- backup teacher guidance；
-- action mask；
-- GNN-style oracle state encoder；
-- cost/latency/risk 的 primal-dual Lagrange multiplier 动态更新。
-
-**特点：**
-
-- 比 COBRA 更灵活，因为它学习 single/serial/parallel 模式；
-- 主预言机和 backup 都由学习策略选择；
-- 可以根据场景动态决定是否使用冗余；
-- 适合 rl_harder 这类高风险、非平稳、隐藏真实验证概率的场景；
-- 是本仓库中最完整、最复杂的改进方法。
+这使模式策略能够判断当前请求是否需要安全冗余，而不是固定使用某一种 backup 策略。
 
 ---
 
-## 5. 状态、奖励与场景设置
+## 6. 审计感知声誉机制
 
-### 5.1 State Mode
+### 6.1 基本思想
+
+传统 reputation update 依赖历史成功率，容易受到伪装节点影响。恶意节点可以在早期保持正常行为积累信誉，然后在高价值或高负载场景中作恶。
+
+为缓解该问题，代码中引入 **audit-aware reputation correction**。每个预言机维护一个审计后验：
+
+$$
+\alpha_i, \beta_i,
+$$
+
+其中：
+
+- $\alpha_i$ 表示审计通过的可信证据；
+- $\beta_i$ 表示审计失败或风险证据。
+
+审计后验可信度定义为：
+
+$$
+truth_i = \frac{\alpha_i}{\alpha_i+\beta_i}.
+$$
+
+### 6.2 有效信誉
+
+调度策略实际使用的不是原始信誉 $rep_i$，而是融合审计后验后的有效信誉：
+
+$$
+rep_i^{eff}
+=
+\mathrm{clip}\left(
+(1-w_a)rep_i + w_a truth_i - \eta \cdot cooldown_i,
+0,1
+\right),
+$$
+
+其中：
+
+- $w_a$ 对应 `Audit_Weight_In_Reputation`；
+- $cooldown_i$ 表示审计失败后的冷却状态；
+- $\eta$ 对应 `Audit_Cooldown_Penalty`；
+- `clip` 将信誉限制在 $[0,1]$。
+
+### 6.3 审计触发
+
+审计由基础触发率与风险触发率共同决定：
+
+$$
+P(audit_i) = p_{base} + p_{risk}\cdot \mathbb{I}(risk_i > \delta_r),
+$$
+
+其中：
+
+- $p_{base}$ 对应 `Audit_Base_Rate`；
+- $p_{risk}$ 对应 `Audit_Risk_Rate`；
+- $\delta_r$ 对应高风险阈值。
+
+当节点审计失败时，其信誉会被快速惩罚；当节点持续通过审计时，其信誉会缓慢恢复。这种非对称更新符合安全场景中的常见假设：**失信应快速惩罚，可信应谨慎恢复**。
+
+---
+
+## 7. 图结构预言机编码器
+
+### 7.1 预言机图建模
+
+HCRL-Oracle 支持 GNN-style oracle encoder。预言机被视为图中的节点：
+
+$$
+G=(\mathcal{O}, E),
+$$
+
+其中边权由服务类型、可靠性、负载和成本相似性共同决定。
+
+对于两个预言机 $o_i$ 和 $o_j$，邻接权重可以表示为：
+
+$$
+A_{ij}
+\propto
+w_s \mathbb{I}(\tau_i=\tau_j)
++ w_r(1-|rel_i-rel_j|)
++ w_l(1-|load_i-load_j|)
++ w_c(1-|cost_i-cost_j|),
+$$
+
+其中：
+
+- $w_s$ 对应 `GNN_Service_Weight`；
+- $w_r$ 对应 `GNN_Reliability_Weight`；
+- $w_l$ 对应 `GNN_Load_Weight`；
+- $w_c$ 对应 `GNN_Cost_Weight`。
+
+邻接矩阵经过归一化后用于消息传递。
+
+### 7.2 消息传递
+
+设第 $k$ 层中预言机 $i$ 的表示为 $h_i^{(k)}$，则一次消息传递可写为：
+
+$$
+h_i^{(k+1)} =
+\tanh\left(
+\lambda_{self}h_i^{(k)}
++
+\lambda_{neigh}\sum_{j\ne i}A_{ij}h_j^{(k)}
++
+\lambda_{req}g_i
+\right),
+$$
+
+其中：
+
+- $\lambda_{self}$ 对应 `GNN_Self_Weight`；
+- $\lambda_{neigh}$ 对应 `GNN_Neighbor_Weight`；
+- $g_i$ 表示当前请求类型与预言机类型的匹配门控；
+- 消息传递步数由 `GNN_Message_Steps` 控制。
+
+该编码器使模型不仅能看到单个预言机的属性，还能建模 oracle pool 内部的结构关系。例如，同服务类型节点、相似可靠性节点和相似负载节点之间可以相互传递上下文信息。
+
+---
+
+## 8. 层次化策略与执行模式
+
+### 8.1 执行模式集合
+
+HCRL 默认使用以下五种模式：
 
 ```text
---State_Mode original
+single_cost
+single_safe
+serial_safe
+parallel_fast
+parallel_safe
 ```
 
-原始状态，主要包含请求类型、各预言机等待时间和信誉。
+可以记为：
+
+$$
+\mathcal{M}=\{m_1,m_2,m_3,m_4,m_5\}.
+$$
+
+| 模式 | 含义 | 适用场景 |
+|---|---|---|
+| `single_cost` | 只调用一个主预言机，偏向成本效率。 | 风险低、deadline 不紧、成本敏感。 |
+| `single_safe` | 只调用一个主预言机，但偏向可信节点。 | 风险中等、无需备份但不能过度追求低成本。 |
+| `serial_safe` | 先调用主预言机，失败或风险触发后再调用备份。 | 成本敏感但需要恢复能力。 |
+| `parallel_fast` | 主预言机和备份以并行或 warm-standby 方式执行。 | deadline 紧张，需要降低响应延迟。 |
+| `parallel_safe` | 并行冗余并更强调安全性。 | 高风险请求或主预言机可信度不足。 |
+
+### 8.2 模式掩码
+
+代码中不是所有模式在每个状态下都可用。HCRL 使用 mode mask 排除明显不合理的模式。
+
+设模式可用性为：
+
+$$
+mask_m(s_t)\in\{0,1\}^{|\mathcal{M}|}.
+$$
+
+例如：
+
+1. 如果没有可用 backup，禁用 serial 和 parallel 模式；
+2. 如果 backup score 低于阈值，禁用 backup 相关模式；
+3. 如果 deadline slack 不足，禁用 `serial_safe`；
+4. 如果 cost pressure 过高，禁用 parallel 模式；
+5. 如果 primary risk 过高或 audit truth 过低，禁用 `single_cost`；
+6. 如果 primary truth 过低但存在 backup，禁用 `single_safe`。
+
+该机制可以写为：
+
+$$
+\pi_m(m|s)=0,\quad \forall m \; \text{s.t.}\; mask_m(s)=0.
+$$
+
+最终策略在可行动作集合上重新归一化：
+
+$$
+\pi_m(m|s)=
+\frac{\exp(f_m(s))\cdot mask_m(s)}
+{\sum_{m'}\exp(f_{m'}(s))\cdot mask_m(s)}.
+$$
+
+### 8.3 主预言机评分先验
+
+代码中存在一个可解释的主预言机评分函数，用于模式状态、启发式选择和安全判断。其形式可概括为：
+
+$$
+Score_i^{primary}
+=
+0.35rep_i
++0.25obs_i
++0.20ontime_i
++0.15match_i
+-0.15cost_i
+-0.25risk_i.
+$$
+
+其中：
+
+- $rep_i$ 为有效信誉；
+- $obs_i$ 为观测到的成功率估计；
+- $ontime_i$ 为按时完成概率估计；
+- $match_i$ 为服务类型匹配项；
+- $cost_i$ 为成本项；
+- $risk_i$ 为综合风险项。
+
+该评分不是最终的 HCRL policy，而是为高层模式判断和安全约束提供结构化先验。
+
+### 8.4 备份预言机评分先验
+
+备份预言机评分函数综合最近成功率、信誉、质押、按时概率、成本和风险：
+
+$$
+Score_i^{backup}
+=
+w_{succ}obs_i
++w_{rep}rep_i
++w_{token}token_i
++0.18ontime_i
+-w_{cost}cost_i
+-w_{risk}risk_i
+-0.08\mathbb{I}(cost_i>C_{cap}).
+$$
+
+对应代码参数包括：
 
 ```text
---State_Mode enhanced
+PB_W_RECENT_SUCCESS
+PB_W_REPUTATION
+PB_W_TOKEN
+PB_W_COST
+PB_W_BEHAVIOR_RISK
+PB_Backup_Cost_Limit
 ```
 
-增强状态，在 original 基础上加入请求长度、截止时间、成本、处理能力、类型匹配、验证概率或历史成功率、最近负载等信息。
+同时，备份候选集合会排除主预言机：
+
+$$
+b_t \ne p_t.
+$$
+
+这种设计避免 primary 和 backup 选择同一个节点导致的“伪冗余”。
 
 ---
 
-### 5.2 GNN Encoder
+## 9. 成本—延迟—风险约束奖励
+
+### 9.1 基础奖励
+
+对于一次请求执行，基础奖励可以抽象为：
+
+$$
+r_t^{base}
+=
+\omega_s S_t
++
+\omega_m M_t
++
+\omega_r Rep_t
+-
+\omega_c C_t
+-
+\omega_l L_t
+-
+\omega_o O_t,
+$$
+
+其中：
+
+- $S_t$ 表示是否验证成功；
+- $M_t$ 表示服务类型是否匹配；
+- $Rep_t$ 表示所选预言机信誉；
+- $C_t$ 表示调用成本；
+- $L_t$ 表示响应时间或延迟；
+- $O_t$ 表示超时或失败惩罚。
+
+### 9.2 HCRL 约束项
+
+HCRL 进一步引入成本、延迟和风险预算：
+
+$$
+C_t \le B_C,
+$$
+
+$$
+L_t \le B_L,
+$$
+
+$$
+\rho_t \le B_R,
+$$
+
+其中：
+
+- $B_C$ 对应 `HCRL_Cost_Budget`；
+- $B_L$ 对应 `HCRL_Latency_Budget`；
+- $B_R$ 对应 `HCRL_Risk_Budget`；
+- $\rho_t$ 表示当前 primary-backup 组合的风险估计。
+
+约束惩罚可以写为：
+
+$$
+\mathcal{P}_t
+=
+\lambda_C [C_t-B_C]_+
++
+\lambda_L [L_t-B_L]_+
++
+\lambda_R [\rho_t-B_R]_+,
+$$
+
+其中 $[x]_+=\max(x,0)$。
+
+### 9.3 HCRL 总奖励
+
+HCRL 的总奖励可以概括为：
+
+$$
+r_t^{HCRL}
+=
+r_t^{base}
++eta_1\mathbb{I}(success)
++eta_2\mathbb{I}(backup\_recovery)
++eta_3\mathbb{I}(trusted\_selection)
+-eta_4\mathbb{I}(malicious\_primary)
+-eta_5\mathbb{I}(malicious\_backup)
+-eta_6\mathbb{I}(unnecessary\_backup)
+-eta_7\mathbb{I}(skip\_needed\_backup)
+-
+\mathcal{P}_t.
+$$
+
+其中与 HCRL 相关的重要参数包括：
 
 ```text
---Use_GNN_Encoder
+HCRL_Primary_Success_Bonus
+HCRL_Backup_Recovery_Bonus
+HCRL_Backup_Used_Penalty
+HCRL_Unnecessary_Backup_Penalty
+HCRL_Skip_Recovery_Penalty
+HCRL_Primary_Malicious_Penalty
+HCRL_Backup_Malicious_Penalty
+HCRL_Final_Success_Bonus
+HCRL_Success_Gain_Bonus
+HCRL_Safety_Override_Bonus
+HCRL_Estimated_Risk_Penalty
+HCRL_Total_Cost_Penalty
+HCRL_Trusted_Selection_Bonus
+HCRL_Backup_Trust_Bonus
 ```
 
-启用动态图消息传递式 oracle encoder。它将预言机视作图节点，根据服务类型、可靠性、负载和成本等关系进行 message passing，再将编码后的 oracle 表征输入 RL 模型。
+### 9.4 Primal-dual 约束更新
 
-HCRL-Oracle 默认适合搭配 GNN encoder，因为层次化策略需要更丰富的 oracle context。
+代码支持 primal-dual 风格的动态约束权重。约束乘子可以抽象更新为：
+
+$$
+\lambda_k \leftarrow
+\mathrm{clip}\left(
+\lambda_k + \eta_\lambda (g_k(s_t,a_t)-B_k),
+\lambda_{min},
+\lambda_{max}
+\right),
+$$
+
+其中 $k\in\{C,L,R\}$ 分别表示成本、延迟和风险约束。
+
+对应参数为：
+
+```text
+HCRL_Primal_Dual
+HCRL_Lambda_LR
+HCRL_Lambda_Min
+HCRL_Lambda_Max
+```
+
+该机制使 HCRL 不需要固定地惩罚所有约束，而是可以根据当前训练过程中约束违反情况动态调整惩罚强度。
 
 ---
 
-### 5.3 Reward Mode
+## 10. HCRL 与其他方法的对比
 
-```text
---Reward_Mode original
-```
+### 10.1 总体对比
 
-保留原始 TCO-DRL 风格 reward，主要考虑成本、执行时间、信誉和服务类型匹配。
+| 维度 | DQN | RA-DDQN | PB-SafeDQN | COBRA-Oracle | HCRL-Oracle |
+|---|---:|---:|---:|---:|---:|
+| 单预言机选择 | 是 | 是 | 是 | 是 | 是 |
+| 主备机制 | 否 | 否 | 是 | 是 | 是 |
+| 备份选择可学习 | 否 | 否 | 否 | 部分 | 是 |
+| 执行模式可学习 | 否 | 否 | 否 | 否 | 是 |
+| 支持 single/serial/parallel | 否 | 否 | 部分 | 部分 | 是 |
+| 支持 teacher guidance | 否 | 否 | 否 | 是 | 是 |
+| 支持 GNN oracle encoder | 可选 | 可选 | 可选 | 可选 | 默认支持 |
+| 支持审计声誉 | 是 | 是 | 是 | 是 | 是 |
+| 支持成本约束 | 间接 | 间接 | 部分 | 是 | 是 |
+| 支持延迟约束 | 间接 | 间接 | 部分 | 是 | 是 |
+| 支持风险约束 | 间接 | 是 | 是 | 是 | 是 |
+| 主要优势 | 基础 RL | 稳定 Q 学习 | 安全恢复 | 约束 backup gate | 层次化安全控制 |
 
-```text
---Reward_Mode risk_aware
-```
+### 10.2 与 DQN 的区别
 
-引入 validation-aware success、行为风险、超时惩罚、响应时间惩罚和成本惩罚，更适合模拟恶意或不稳定预言机环境。
+DQN 学习的是：
+
+$$
+Q(s,o_i),
+$$
+
+即在状态 $s$ 下选择预言机 $o_i$ 的长期价值。
+
+HCRL 学习的是：
+
+$$
+\pi_m(m|s^m),\quad \pi_p(p|s^p),\quad \pi_b(b|s^b,m,p).
+$$
+
+因此 HCRL 不只是回答“选哪个节点”，还回答“采用何种安全执行结构”。
+
+### 10.3 与 RA-DDQN 的区别
+
+RA-DDQN 通过 Dueling Double DQN 提高单预言机选择的稳定性，但其动作仍然是单节点：
+
+$$
+a_t=o_i.
+$$
+
+HCRL 的动作是结构化组合：
+
+$$
+a_t=(m_t,p_t,b_t).
+$$
+
+因此，HCRL 更适合处理需要冗余、恢复和安全模式切换的场景。
+
+### 10.4 与 PB-SafeDQN 的区别
+
+PB-SafeDQN 已经引入 primary-backup 思想，但其备份更多依赖规则评分，而不是独立学习策略。HCRL 则显式学习 backup policy：
+
+$$
+b_t \sim \pi_b(\cdot|s_t^b,m_t,p_t).
+$$
+
+同时，PB-SafeDQN 的执行模式较固定，而 HCRL 可以根据上下文在 single、serial 和 parallel 之间动态切换。
+
+### 10.5 与 COBRA-Oracle 的区别
+
+COBRA-Oracle 强调 constrained backup gate，即是否启用 backup 由 adaptive gate 控制。其核心仍然接近：
+
+$$
+primary\;selection + backup\;gate.
+$$
+
+HCRL 进一步将 gate 扩展为 mode policy：
+
+$$
+backup\;gate \Rightarrow mode\;policy.
+$$
+
+这意味着 HCRL 不只是决定“用不用 backup”，还决定：
+
+- 使用 cost-oriented single；
+- 使用 safety-oriented single；
+- 使用 serial recovery；
+- 使用 parallel fast；
+- 使用 parallel safe。
+
+因此，HCRL 的动作表达能力更强，也更适合复杂非平稳环境。
 
 ---
 
-### 5.4 Success Mode
+## 11. 安装与运行
 
-```text
---Success_Mode original
-```
-
-成功主要由 deadline 和服务类型匹配决定。
-
-```text
---Success_Mode validation_aware
-```
-
-成功还要求预言机返回结果通过验证，因此更适合区块链 oracle 场景。
-
----
-
-### 5.5 Scenario
-
-```text
---Scenario static
-```
-
-原始静态场景，适合复现实验和基础方法比较。
-
-```text
---Scenario validation_stress
-```
-
-低成本预言机不再总是可靠，用于测试方法是否能识别低成本高风险节点。
-
-```text
---Scenario rl_hard
-```
-
-加入 bursty requests 和 fatigue traps。过度使用某些低成本节点会导致验证概率下降。
-
-```text
---Scenario rl_harder
-```
-
-更困难的非平稳场景：隐藏真实验证概率、增强疲劳效应、收紧 deadline，并设置更强的 bait oracle。该场景更能体现长期 RL 策略、backup 和层次化控制的价值。
-
----
-
-## 6. 快速运行
-
-进入仿真实验目录：
+### 11.1 克隆仓库
 
 ```bash
-cd "TCO-DRL_with baseline"
+git clone -b hcrl https://github.com/flankerLym/TCO-DRL.git
+cd "TCO-DRL/TCO-DRL_with baseline"
 ```
 
-运行默认 baseline：
+### 11.2 安装依赖
 
 ```bash
-python main.py
+python -m pip install numpy pandas scipy matplotlib
 ```
 
-运行包含 RA-DDQN、PB-SafeDQN 和 COBRA 的主实验：
+当前主要学习模型为 NumPy 实现，不依赖 GPU。
+
+---
+
+## 12. 复现实验命令
+
+### 12.1 查看可用方法
+
+```bash
+python main.py --List_Methods
+```
+
+### 12.2 快速测试
 
 ```bash
 python main.py \
+  --Seed 6 \
+  --Method_Preset all \
   --Scenario rl_harder \
-  --Use_RA_DDQN \
-  --Use_PB_SafeDQN \
-  --Use_COBRA \
   --Oracles_Per_Type 10 \
-  --Epoch 30 \
-  --Request_Num 6000 \
+  --Epoch 3 \
+  --Request_Num 1000 \
   --Reward_Scale 2.0 \
   --Reward_Clip 2.0 \
-  --Dqn_lr 0.0015 \
-  --RA_lr 0.0012 \
-  --COBRA_lr 0.0014 \
-  --Dqn_batch_size 128 \
-  --Dqn_memory_size 10000 \
-  --Dqn_epsilon_increment 0.0008
+  --Run_Tag quick_all_methods
 ```
 
-运行包含 HCRL-Oracle 的主实验：
+Windows PowerShell：
+
+```powershell
+python main.py `
+  --Seed 6 `
+  --Method_Preset all `
+  --Scenario rl_harder `
+  --Oracles_Per_Type 10 `
+  --Epoch 3 `
+  --Request_Num 1000 `
+  --Reward_Scale 2.0 `
+  --Reward_Clip 2.0 `
+  --Run_Tag quick_all_methods
+```
+
+### 12.3 训练全部方法
 
 ```bash
 python main.py \
+  --Seed 6 \
+  --Method_Preset all \
   --Scenario rl_harder \
-  --Use_RA_DDQN \
-  --Use_PB_SafeDQN \
-  --Use_COBRA \
-  --Use_HCRL \
   --Oracles_Per_Type 10 \
   --Epoch 30 \
   --Request_Num 6000 \
@@ -450,158 +892,255 @@ python main.py \
   --Dqn_batch_size 128 \
   --Dqn_memory_size 10000 \
   --Dqn_epsilon_increment 0.0008 \
-  --Run_Tag hcrl_main
+  --Run_Tag all_methods_seed6
 ```
 
-Windows PowerShell 用户也可以直接运行 `scripts/` 下的一键脚本，例如：
+Windows PowerShell：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_01_main_cobra.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_09_hcrl_main.ps1
-powershell -ExecutionPolicy Bypass -File scripts/run_10_hcrl_ablation.ps1
+python main.py `
+  --Seed 6 `
+  --Method_Preset all `
+  --Scenario rl_harder `
+  --Oracles_Per_Type 10 `
+  --Epoch 30 `
+  --Request_Num 6000 `
+  --Reward_Scale 2.0 `
+  --Reward_Clip 2.0 `
+  --Dqn_lr 0.0015 `
+  --RA_lr 0.0012 `
+  --COBRA_lr 0.0014 `
+  --HCRL_lr 0.0014 `
+  --HCRL_Mode_lr 0.0012 `
+  --Dqn_batch_size 128 `
+  --Dqn_memory_size 10000 `
+  --Dqn_epsilon_increment 0.0008 `
+  --Run_Tag all_methods_seed6
+```
+
+### 12.4 只训练 HCRL-Oracle
+
+```bash
+python main.py \
+  --Seed 6 \
+  --Method_Preset hcrl_only \
+  --Scenario rl_harder \
+  --Oracles_Per_Type 10 \
+  --Epoch 30 \
+  --Request_Num 6000 \
+  --Reward_Scale 2.0 \
+  --Reward_Clip 2.0 \
+  --HCRL_lr 0.0014 \
+  --HCRL_Mode_lr 0.0012 \
+  --Dqn_batch_size 128 \
+  --Dqn_memory_size 10000 \
+  --Run_Tag hcrl_only_seed6
 ```
 
 ---
 
-## 7. 消融实验建议
+## 13. 消融实验
 
-为了验证每个模块的贡献，建议依次进行以下消融：
+### 13.1 HCRL 完整版本
 
-### 7.1 COBRA 消融
-
-```bash
-# 禁用 teacher warm-start / teacher guidance
-python main.py --Scenario rl_harder --Use_RA_DDQN --Use_PB_SafeDQN --Use_COBRA --COBRA_No_Teacher
-
-# 使用随机 backup，检验 safety-ranked backup selector 是否有效
-python main.py --Scenario rl_harder --Use_RA_DDQN --Use_PB_SafeDQN --Use_COBRA --COBRA_Random_Backup
-
-# 禁用 decoupled reward，检验 primary-only reward 是否有帮助
-python main.py --Scenario rl_harder --Use_RA_DDQN --Use_PB_SafeDQN --Use_COBRA --COBRA_No_Decoupled_Reward
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\run_20_full_hcrl_gnn.ps1"
 ```
 
-### 7.2 HCRL 消融
+### 13.2 去除 GNN 编码器
 
-```bash
-# 禁用 teacher
-python main.py --Scenario rl_harder --Use_HCRL --HCRL_No_Teacher
-
-# 禁用约束项
-python main.py --Scenario rl_harder --Use_HCRL --HCRL_No_Constrained
-
-# 使用随机 backup
-python main.py --Scenario rl_harder --Use_HCRL --HCRL_Random_Backup
-
-# 强制 single mode，检验 backup/committee 模式是否有效
-python main.py --Scenario rl_harder --Use_HCRL --HCRL_Fixed_Single_Mode
-
-# 强制 parallel mode，检验 learned mode policy 是否优于固定策略
-python main.py --Scenario rl_harder --Use_HCRL --HCRL_Fixed_Parallel_Mode
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\run_21_hcrl_no_gnn.ps1"
 ```
+
+该实验用于验证图结构 oracle encoder 是否提升了状态表征能力。
+
+### 13.3 去除 teacher guidance
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\run_24_hcrl_no_teacher.ps1"
+```
+
+该实验用于验证 DQN / RA-DDQN / COBRA 等 teacher 是否有助于 HCRL 初期稳定训练。
+
+### 13.4 去除约束惩罚
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\run_25_hcrl_no_constrained.ps1"
+```
+
+该实验用于验证成本—延迟—风险约束是否真正降低约束违反和恶意分配。
+
+### 13.5 随机备份选择
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\run_26_hcrl_random_backup.ps1"
+```
+
+该实验用于验证 learned backup selector 是否优于随机 backup。
+
+### 13.6 固定 single 模式
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\run_27_hcrl_fixed_single.ps1"
+```
+
+该实验用于验证 serial / parallel 模式是否带来额外安全收益。
+
+### 13.7 固定 parallel 模式
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\run_28_hcrl_fixed_parallel.ps1"
+```
+
+该实验用于验证 learned mode policy 是否优于固定并行冗余策略。
+
+### 13.8 一键运行论文实验集合
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\run_29_all_paper_experiments.ps1"
+```
+
+该脚本会依次运行 HCRL 完整版本、HCRL 消融、COBRA 公平对照和 RA-DDQN 公平对照，并最终汇总结果。
 
 ---
 
-## 8. 输出结果
+## 14. 输出文件与指标解释
 
-每次运行会在 `output/` 下自动创建一个独立文件夹，文件夹名包含运行时间、Epoch、Request_Num、Scenario、Seed 和 Run_Tag。
-
-典型输出包括：
+每次运行会在 `output/` 下生成独立文件夹：
 
 ```text
 output/
 └── YY_M_D_HH_MM_Epoch{N}_Req{M}_{Scenario}_Seed{S}_{Run_Tag}/
-    ├── *.txt                         # 完整控制台日志
+    ├── *.txt                         # 完整日志
     ├── *_final_results.csv           # 最终结果表
     ├── *_final_results.json          # 最终结果 JSON
-    ├── *.npz                         # DQN/PPO/RA-DDQN/COBRA/HCRL 模型参数
-    └── *.pdf                         # reward 或性能曲线图
+    ├── DQN.npz                       # DQN 权重
+    ├── PPO.npz                       # PPO 权重
+    ├── RA-DDQN.npz                   # RA-DDQN 权重
+    ├── PB-SafeDQN.npz                # PB-SafeDQN 权重
+    ├── COBRA-Oracle.npz              # COBRA 权重
+    ├── HCRL_Mode.npz                 # HCRL 模式策略权重
+    ├── HCRL_Primary.npz              # HCRL 主预言机策略权重
+    └── HCRL_Backup.npz               # HCRL 备份策略权重
 ```
 
-建议论文或报告中优先展示：
+主要指标如下。
 
-- success rate；
-- success-in-time rate；
-- average response time；
-- cost；
-- cost per success；
-- malicious oracle assignment；
-- trusted oracle assignment；
-- backup recovery rate；
-- conditional backup recovery rate；
-- constraint violation rate；
-- HCRL single/serial/parallel mode usage。
+| 指标 | 含义 |
+|---|---|
+| `reward` | 累计奖励。 |
+| `avg_responseT` | 平均响应时间。 |
+| `success_rate` | 总体成功率。 |
+| `success_time_rate` | 截止时间内成功率。 |
+| `finishT` | 总完成时间。 |
+| `Cost` | 总成本。 |
+| `cost_per_success` | 每次成功请求的平均成本。 |
+| `malicious_rate` | 恶意预言机分配比例。 |
+| `normal_rate` | 普通预言机分配比例。 |
+| `trusted_rate` | 可信预言机分配比例。 |
+| `primary_success_rate` | 主预言机成功率。 |
+| `backup_used_rate` | 备份使用比例。 |
+| `backup_recovery_rate` | 总体备份恢复比例。 |
+| `conditional_backup_recovery_rate` | 在使用备份条件下的恢复成功率。 |
+| `backup_skipped_rate` | 备份跳过比例。 |
+| `backup_score_mean` | 平均备份评分。 |
+| `single_mode_rate` | HCRL 使用 single 模式比例。 |
+| `serial_mode_rate` | HCRL 使用 serial 模式比例。 |
+| `parallel_mode_rate` | HCRL 使用 parallel 模式比例。 |
+| `audit_rate` | 审计触发比例。 |
+| `audit_pass_rate` | 审计通过比例。 |
+| `audit_fail_rate` | 审计失败比例。 |
+| `audit_truth_mean` | 平均审计后验可信度。 |
 
----
+对于 HCRL-Oracle，建议重点报告：
 
-## 9. 区块链部署版本
-
-`TCO-DRL_on blockchain/` 提供了链上测试版本，主要用于将 oracle selection 合约部署到 Ethereum/Ganache/Truffle 环境中，并通过 Python 与合约交互。
-
-基本流程：
-
-```bash
-# 1. 启动 Ganache 并生成账户
-端口和账户数量根据实验设置调整
-
-# 2. 编译智能合约
-truffle compile
-
-# 3. 部署智能合约
-truffle migrate
-
-# 4. 修改 Python 代码中的 Web3 Provider、合约地址和 ABI 路径
-# 5. 运行链上 oracle selection 实验
-python main.py
-```
-
-注意：链上版本需要正确配置 Geth/Truffle/Ganache/Node/Web3 等依赖，并记录部署后的 contract address。
-
----
-
-## 10. 方法选择建议
-
-如果只是复现实验或快速检查环境，建议先运行：
-
-```bash
-python main.py --Epoch 1 --Request_Num 500
-```
-
-如果要比较原始 TCO-DRL 与传统 baseline，使用默认方法即可：
-
-```bash
-python main.py
-```
-
-如果要测试风险感知单预言机选择，建议加入：
-
-```bash
---Use_RA_DDQN --Scenario rl_harder
-```
-
-如果要测试 primary-backup 安全恢复机制，建议运行：
-
-```bash
---Use_RA_DDQN --Use_PB_SafeDQN --Use_COBRA --Scenario rl_harder
-```
-
-如果要测试最完整的层次化约束强化学习方法，建议运行：
-
-```bash
---Use_RA_DDQN --Use_PB_SafeDQN --Use_COBRA --Use_HCRL --Scenario rl_harder
+```text
+success_rate
+success_time_rate
+avg_responseT
+Cost
+cost_per_success
+malicious_rate
+trusted_rate
+backup_used_rate
+conditional_backup_recovery_rate
+single_mode_rate
+serial_mode_rate
+parallel_mode_rate
+audit_fail_rate
+audit_truth_mean
 ```
 
 ---
 
-## 11. 一句话总结各方法
+## 15. 推荐实验设置
 
-- **Random**：完全随机，最低基准。
-- **Round-Robin**：均匀轮询，测试公平分配。
-- **Earliest**：优先选等待时间最短的预言机。
-- **BLOR**：用 Bayesian bandit 根据历史成功率和成本选预言机。
-- **SemiGreedy**：根据当前 reward/cost 做一步贪心选择。
-- **DQN / TCO-DRL**：原始深度 Q-learning oracle selection 方法。
-- **PPO**：策略梯度 RL baseline。
-- **RA-DDQN**：更稳定、更风险感知的 Dueling Double DQN。
-- **PB-SafeDQN**：Dueling DDQN 主预言机 + 规则型安全 backup。
-- **COBRA-Oracle**：teacher-guided primary selector + adaptive constrained backup gate。
-- **HCRL-Oracle**：层次化学习 single/serial/parallel 模式、主预言机和 backup 的完整约束 RL 方法。
+### 15.1 单次主实验
+
+推荐使用：
+
+```text
+Scenario = rl_harder
+Epoch = 30
+Request_Num = 6000
+Oracles_Per_Type = 10
+Seed = 6
+```
+
+### 15.2 多随机种子实验
+
+为了进行更稳定的学术报告，建议使用多个随机种子并报告均值与标准差：
+
+```text
+Seed = 6, 42, 43, 2024, 2025
+```
+
+PowerShell 示例：
+
+```powershell
+$seeds = @(6, 42, 43, 2024, 2025)
+
+foreach ($s in $seeds) {
+  python main.py `
+    --Seed $s `
+    --Method_Preset all `
+    --Scenario rl_harder `
+    --Oracles_Per_Type 10 `
+    --Epoch 30 `
+    --Request_Num 6000 `
+    --Reward_Scale 2.0 `
+    --Reward_Clip 2.0 `
+    --Dqn_lr 0.0015 `
+    --RA_lr 0.0012 `
+    --COBRA_lr 0.0014 `
+    --HCRL_lr 0.0014 `
+    --HCRL_Mode_lr 0.0012 `
+    --Dqn_batch_size 128 `
+    --Dqn_memory_size 10000 `
+    --Dqn_epsilon_increment 0.0008 `
+    --Run_Tag "all_methods_seed$s"
+}
+```
+
+最终报告格式建议为：
+
+$$
+\mathrm{Metric}=\mathrm{mean}\pm\mathrm{std}.
+$$
+
+---
+
+## 16. 方法总结
+
+HCRL-Oracle 的核心贡献可以概括为：
+
+1. **层次化决策结构**：将 oracle selection 拆分为模式选择、主预言机选择和备份预言机选择；
+2. **自适应执行模式**：在 `single_cost`、`single_safe`、`serial_safe`、`parallel_fast` 和 `parallel_safe` 之间动态切换；
+3. **审计感知声誉修正**：通过隐藏审计后验修正被恶意节点操纵的历史信誉；
+4. **图结构 oracle encoder**：基于服务类型、可靠性、负载和成本相似性建模 oracle pool 的结构关系；
+5. **成本—延迟—风险约束优化**：在提高成功率的同时控制冗余成本、响应延迟和恶意分配风险；
+6. **teacher-guided 稳定训练**：使用 DQN、RA-DDQN 或 COBRA 作为早期 teacher，提高 HCRL 初期训练稳定性；
+7. **可解释消融设计**：通过 no-GNN、no-teacher、no-constrained、random-backup、fixed-single 和 fixed-parallel 验证各模块贡献。
+
+相比于 DQN、RA-DDQN、PB-SafeDQN 和 COBRA-Oracle，HCRL-Oracle 的主要优势在于它不再将 backup 视为一个固定附加模块，而是将安全冗余本身纳入可学习的层次化决策结构中。因此，在高风险、非平稳、验证感知和成本受限的区块链预言机环境中，HCRL-Oracle 提供了一种更灵活、更稳健且更具解释性的调度框架。
