@@ -2,3 +2,7 @@ TCO-DRL_with baseline/.idea
 /TCO-DRL_with baseline/output
 /TCO-DRL_on blockchain/.idea
 /tco_real_trace_dataset_collection/data
+/collusion_gnn_experiments/output
+/audit_reputation_recovery_experiments/example_output
+/audit_reputation_recovery_experiments/output
+/experiments_real_trace/output
