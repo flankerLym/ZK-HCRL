@@ -3,7 +3,7 @@ import sys
 
 # Run from a parallel experiment folder without modifying baseline experiment folders.
 _ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__),
-                                         "../../../../../下载/tco_drl_real_trace_guarded_eval_fix_v2_shortpath"))
+                                         "../../../../../下载/tco_drl_real_trace_ccfb_baselines_cover_code_v2_fix_methods"))
 if _ROOT_DIR not in sys.path:
     sys.path.insert(0, _ROOT_DIR)
 
@@ -100,6 +100,14 @@ def build_models(env, args):
                                     update_epochs=args.PPO_update_epochs, hidden_units=args.PPO_hidden,
                                     scope="PPO", actor_lr=getattr(args, "PPO_lr", 0.0015), seed=args.Seed,
                                     reward_clip=args.Reward_Clip)
+    if "Safe-PPO" in args.Baselines:
+        # A constrained/safe PPO baseline: same PPO backbone, plus an observable
+        # safety layer in the action-selection step. It is a baseline, not HCRL:
+        # no hierarchical mode head and no learned backup policy are introduced.
+        brain["Safe-PPO"] = baseline_PPO(env.actionNum, env.s_features, batch_size=args.PPO_batch_size,
+                                         update_epochs=args.PPO_update_epochs, hidden_units=args.PPO_hidden,
+                                         scope="Safe_PPO", actor_lr=getattr(args, "PPO_lr", 0.0015),
+                                         seed=args.Seed + 733, reward_clip=args.Reward_Clip)
     if "RA-DDQN" in args.Baselines:
         brain["RA-DDQN"] = DuelingDoubleDQN(env.actionNum, env.s_features, hidden_units=args.Dqn_hidden,
                                             scope="RA_DDQN", learning_rate=args.RA_lr,
@@ -144,6 +152,7 @@ def _canonical_weight_key(name):
     aliases = {
         "dqn": "DQN", "tco-drl": "DQN", "tco_drl": "DQN",
         "ppo": "PPO",
+        "safe-ppo": "Safe-PPO", "safe_ppo": "Safe-PPO", "constrained-ppo": "Safe-PPO", "constrained_ppo": "Safe-PPO",
         "ra": "RA-DDQN", "ra-ddqn": "RA-DDQN", "ra_ddqn": "RA-DDQN", "raddqn": "RA-DDQN",
         "pb": "PB-SafeDQN", "pb-safedqn": "PB-SafeDQN", "pb_safedqn": "PB-SafeDQN",
         "cobra": "COBRA-Oracle", "cobra-oracle": "COBRA-Oracle", "cobra_oracle": "COBRA-Oracle",
@@ -152,7 +161,7 @@ def _canonical_weight_key(name):
         "hcrl-primary": "HCRL_Primary", "hcrl_primary": "HCRL_Primary", "hcrlprimary": "HCRL_Primary",
         "hcrl-backup": "HCRL_Backup", "hcrl_backup": "HCRL_Backup", "hcrlbackup": "HCRL_Backup",
     }
-    if key in ["DQN", "PPO", "RA-DDQN", "PB-SafeDQN", "COBRA-Oracle", "HCRL-Oracle", "HCRL_Mode", "HCRL_Primary", "HCRL_Backup"]:
+    if key in ["DQN", "PPO", "Safe-PPO", "RA-DDQN", "PB-SafeDQN", "COBRA-Oracle", "HCRL-Oracle", "HCRL_Mode", "HCRL_Primary", "HCRL_Backup"]:
         return key
     return aliases.get(key.lower(), key)
 
@@ -168,7 +177,7 @@ def _parse_weight_specs(args):
         specs[_canonical_weight_key(k)] = v.strip().strip('"').strip("'")
     shortcut = str(getattr(args, "Weight_Path", "") or "").strip()
     if shortcut:
-        selected_rl = [m for m in getattr(args, "Baselines", []) if m in ["DQN", "PPO", "RA-DDQN", "PB-SafeDQN", "COBRA-Oracle", "HCRL-Oracle"]]
+        selected_rl = [m for m in getattr(args, "Baselines", []) if m in ["DQN", "PPO", "Safe-PPO", "RA-DDQN", "PB-SafeDQN", "COBRA-Oracle", "HCRL-Oracle"]]
         if len(selected_rl) == 1:
             specs[selected_rl[0]] = shortcut
         else:
@@ -241,6 +250,209 @@ def load_requested_weights(brain, args):
 
 def _choose_value_policy(model, state, mask, args):
     return model.choose_best_action(state, mask) if getattr(args, "Greedy_Eval", False) and hasattr(model, "choose_best_action") else model.choose_action(state, mask)
+
+
+def _masked_model_scores(model, state, mask):
+    """Return masked model scores for DQN-like policies without changing their state."""
+    if not hasattr(model, "_sanitize_state") or not hasattr(model, "_forward"):
+        return None, None
+    try:
+        x = model._sanitize_state(state)
+        out = model._forward(x)
+        scores = out[0] if isinstance(out, tuple) else out
+        scores = np.asarray(scores[0], dtype=np.float64)
+        if hasattr(model, "_sanitize_mask"):
+            m = model._sanitize_mask(mask)
+        else:
+            m = np.asarray(mask, dtype=bool)
+        if scores.shape[0] != m.shape[0] or not np.any(m):
+            return None, None
+        z = np.full(scores.shape[0], -1e9, dtype=np.float64)
+        z[m] = scores[m]
+        return z, m
+    except Exception:
+        return None, None
+
+
+def _norm01(x, valid_mask):
+    x = np.asarray(x, dtype=np.float64)
+    m = np.asarray(valid_mask, dtype=bool)
+    out = np.zeros_like(x, dtype=np.float64)
+    if not np.any(m):
+        return out
+    vals = x[m]
+    lo, hi = float(np.min(vals)), float(np.max(vals))
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo < 1e-12:
+        out[m] = 0.5
+    else:
+        out[m] = (vals - lo) / (hi - lo)
+    return out
+
+
+def _baseline_enhance_targets(args):
+    raw = str(getattr(args, "Baseline_Enhance_Targets", "") or "")
+    return {x.strip() for x in raw.replace(";", ",").split(",") if x.strip()}
+
+
+def _choose_enhanced_baseline_action(model, state, mask, env, request_attrs, policy_name, args):
+    """Conservative risk-aware top-K re-ranker for non-HCRL baselines.
+
+    This is intentionally weaker than HCRL: it does not add hierarchical modes or
+    a learned backup policy. It only lets standard baselines break close Q-value
+    ties using observable/estimated risk, reputation, on-time probability and cost.
+    """
+    base_action = _choose_value_policy(model, state, mask, args)
+    if not bool(getattr(args, "Enhance_Baseline_Safety", False)):
+        return base_action
+    if policy_name not in _baseline_enhance_targets(args):
+        return base_action
+    scores, m = _masked_model_scores(model, state, mask)
+    if scores is None:
+        return base_action
+    valid = np.where(m)[0]
+    if valid.size <= 1:
+        return int(base_action)
+
+    # Restrict the safety adjustment to top-K / near-top model actions so it
+    # strengthens baselines without turning them into oracle selectors.
+    k = max(1, int(getattr(args, "Baseline_Enhance_TopK", 10)))
+    top = valid[np.argsort(scores[valid])[-min(k, valid.size):]]
+    q_norm = _norm01(scores, m)
+    max_q_drop = float(np.clip(getattr(args, "Baseline_Enhance_Max_Q_Drop", 0.35), 0.0, 1.0))
+    candidates = set(int(i) for i in top if q_norm[int(i)] >= 1.0 - max_q_drop)
+    candidates.add(int(base_action))
+    cand_mask = np.zeros_like(m, dtype=bool)
+    for i in candidates:
+        if 0 <= i < len(cand_mask) and m[i]:
+            cand_mask[i] = True
+    if not np.any(cand_mask):
+        return int(base_action)
+
+    try:
+        duration, rep, obs, risk, ontime = env._estimated_oracle_metrics(request_attrs, policy_name)
+    except Exception:
+        return int(base_action)
+    cost = np.asarray(getattr(env, "oracleCost", np.ones_like(scores)), dtype=np.float64)
+    if cost.shape[0] != scores.shape[0]:
+        cost = np.ones_like(scores, dtype=np.float64)
+
+    combined = (
+        float(getattr(args, "Baseline_Enhance_Q_Weight", 1.0)) * q_norm
+        + float(getattr(args, "Baseline_Enhance_Rep_Weight", 0.25)) * _norm01(rep, m)
+        + float(getattr(args, "Baseline_Enhance_Ontime_Weight", 0.20)) * _norm01(ontime, m)
+        - float(getattr(args, "Baseline_Enhance_Risk_Weight", 0.55)) * _norm01(risk, m)
+        - float(getattr(args, "Baseline_Enhance_Cost_Weight", 0.08)) * _norm01(cost, m)
+    )
+    combined[~cand_mask] = -1e9
+    return int(np.argmax(combined))
+
+
+def _safe_metric_arrays(env, request_attrs, policy_name, n_actions):
+    """Return observable estimated metrics used by rule baselines and Safe-PPO.
+
+    The function intentionally avoids hidden identity labels. It uses the same
+    estimator exposed by the environment: duration, reputation, observed risk and
+    on-time probability.  Cost is read from the public oracle-cost vector.
+    """
+    try:
+        duration, rep, obs, risk, ontime = env._estimated_oracle_metrics(request_attrs, policy_name)
+    except Exception:
+        duration = np.ones(n_actions, dtype=np.float64)
+        rep = np.zeros(n_actions, dtype=np.float64) + 0.5
+        obs = np.zeros(n_actions, dtype=np.float64)
+        risk = np.zeros(n_actions, dtype=np.float64) + 0.5
+        ontime = np.zeros(n_actions, dtype=np.float64) + 0.5
+    cost = np.asarray(getattr(env, "oracleCost", np.ones(n_actions)), dtype=np.float64)
+    if cost.shape[0] != int(n_actions):
+        cost = np.ones(int(n_actions), dtype=np.float64)
+    return (np.asarray(duration, dtype=np.float64),
+            np.asarray(rep, dtype=np.float64),
+            np.asarray(risk, dtype=np.float64),
+            np.asarray(ontime, dtype=np.float64),
+            cost)
+
+
+def _choose_rule_greedy_action(env, request_attrs, policy_name, mask, rule_name):
+    """Strong transparent rule baselines for CCF-B-level comparison.
+
+    Supported names:
+      - Reputation-Greedy: maximize audit-aware reputation with light risk/cost penalties.
+      - Cost-Aware-Greedy: minimize oracle cost while preserving deadline/risk awareness.
+      - Risk-Aware-Greedy: minimize estimated validation/audit risk first.
+
+    They use observable simulator estimates only; no malicious/trusted identity labels
+    are used in the score.
+    """
+    m = np.asarray(mask, dtype=bool)
+    valid = np.where(m)[0]
+    if valid.size == 0:
+        return 0
+    n = len(m)
+    duration, rep, risk, ontime, cost = _safe_metric_arrays(env, request_attrs, policy_name, n)
+    rep_n = _norm01(rep, m)
+    risk_n = _norm01(risk, m)
+    ontime_n = _norm01(ontime, m)
+    cost_n = _norm01(cost, m)
+    duration_n = _norm01(duration, m)
+
+    if rule_name == "Reputation-Greedy":
+        score = 1.00 * rep_n + 0.25 * ontime_n - 0.35 * risk_n - 0.10 * cost_n
+    elif rule_name == "Cost-Aware-Greedy":
+        score = -1.00 * cost_n + 0.35 * ontime_n + 0.25 * rep_n - 0.20 * risk_n - 0.05 * duration_n
+    elif rule_name == "Risk-Aware-Greedy":
+        score = -1.00 * risk_n + 0.35 * rep_n + 0.25 * ontime_n - 0.08 * cost_n
+    else:
+        score = rep_n - risk_n
+    score[~m] = -1e9
+    return int(np.argmax(score))
+
+
+def _choose_safe_ppo_action(model, state, mask, env, request_attrs, policy_name, args):
+    """Constrained/Safe-PPO action selection.
+
+    PPO supplies the policy prior. A transparent safety layer then re-ranks only
+    top-K / near-top policy actions using observable risk, reputation, on-time
+    probability and cost.  This makes Safe-PPO a stronger RL baseline without
+    granting it HCRL's hierarchical mode or learned backup capabilities.
+    """
+    scores, m = _masked_model_scores(model, state, mask)
+    if scores is None or not np.any(m):
+        if getattr(args, "Greedy_Eval", False) and hasattr(model, "choose_best_action"):
+            return int(model.choose_best_action(state, mask)), 1.0
+        a, prob = model.choose_action(state, mask)
+        return int(a), float(prob)
+
+    # Convert policy logits/Q-like values into a probability-like prior.
+    probs = _softmax_from_logits(scores, m, temperature=1.0)
+    valid = np.where(m)[0]
+    k = max(1, int(getattr(args, "Safe_PPO_TopK", 10)))
+    top = valid[np.argsort(probs[valid])[-min(k, valid.size):]]
+    p_norm = _norm01(probs, m)
+    max_drop = float(np.clip(getattr(args, "Safe_PPO_Max_Policy_Drop", 0.45), 0.0, 1.0))
+    candidates = set(int(i) for i in top if p_norm[int(i)] >= 1.0 - max_drop)
+    if not candidates:
+        candidates = set(int(i) for i in top)
+    cand_mask = np.zeros_like(m, dtype=bool)
+    for i in candidates:
+        if 0 <= i < len(cand_mask) and m[i]:
+            cand_mask[i] = True
+    if not np.any(cand_mask):
+        cand_mask = m.copy()
+
+    duration, rep, risk, ontime, cost = _safe_metric_arrays(env, request_attrs, policy_name, len(m))
+    combined = (
+        float(getattr(args, "Safe_PPO_Policy_Weight", 1.0)) * p_norm
+        + float(getattr(args, "Safe_PPO_Rep_Weight", 0.35)) * _norm01(rep, m)
+        + float(getattr(args, "Safe_PPO_Ontime_Weight", 0.25)) * _norm01(ontime, m)
+        - float(getattr(args, "Safe_PPO_Risk_Weight", 0.70)) * _norm01(risk, m)
+        - float(getattr(args, "Safe_PPO_Cost_Weight", 0.08)) * _norm01(cost, m)
+    )
+    combined[~cand_mask] = -1e9
+    action = int(np.argmax(combined))
+    # PPO's stored prob should not be zero. Use the original policy probability
+    # for the filtered action so the update remains numerically stable.
+    prob = float(max(probs[action], 1e-8))
+    return action, prob
 
 
 def _masked_logits_for_option(model, state, mask):
@@ -520,11 +732,24 @@ for episode in range(args.Epoch):
             a = brain["others"].early_choose_action(env.get_oracle_idleT("Earliest"), mask)
             env.feedback(request_attrs, a, "Earliest")
 
+        # Strong transparent rule baselines. These are useful for paper reviewers
+        # because they test whether HCRL is better than carefully designed
+        # non-learning oracle selectors, not only weak/random baselines.
+        if "Reputation-Greedy" in args.Baselines:
+            a = _choose_rule_greedy_action(env, request_attrs, "Reputation-Greedy", mask, "Reputation-Greedy")
+            env.feedback(request_attrs, a, "Reputation-Greedy")
+        if "Cost-Aware-Greedy" in args.Baselines:
+            a = _choose_rule_greedy_action(env, request_attrs, "Cost-Aware-Greedy", mask, "Cost-Aware-Greedy")
+            env.feedback(request_attrs, a, "Cost-Aware-Greedy")
+        if "Risk-Aware-Greedy" in args.Baselines:
+            a = _choose_rule_greedy_action(env, request_attrs, "Risk-Aware-Greedy", mask, "Risk-Aware-Greedy")
+            env.feedback(request_attrs, a, "Risk-Aware-Greedy")
+
         if "DQN" in brain:
             s = env.getState(request_attrs, "DQN")
             if not args.Eval_Only and "DQN" in last:
                 brain["DQN"].store_transition(last["DQN"][0], last["DQN"][1], last["DQN"][2], s, mask)
-            a = _choose_value_policy(brain["DQN"], s, mask, args)
+            a = _choose_enhanced_baseline_action(brain["DQN"], s, mask, env, request_attrs, "DQN", args)
             r = env.feedback(request_attrs, a, "DQN")
             if not args.Eval_Only and global_step > args.Dqn_start_learn and global_step % args.Dqn_learn_interval == 0:
                 brain["DQN"].learn()
@@ -569,11 +794,20 @@ for episode in range(args.Epoch):
                 if global_step > args.PPO_start_learn and global_step % args.PPO_learn_interval == 0:
                     brain["PPO"].learn()
 
+        if "Safe-PPO" in brain:
+            s = env.getState(request_attrs, "Safe-PPO")
+            a, prob = _choose_safe_ppo_action(brain["Safe-PPO"], s, mask, env, request_attrs, "Safe-PPO", args)
+            r = env.feedback(request_attrs, a, "Safe-PPO")
+            if not args.Eval_Only:
+                brain["Safe-PPO"].store_transition(s, a, r, prob, mask)
+                if global_step > args.PPO_start_learn and global_step % args.PPO_learn_interval == 0:
+                    brain["Safe-PPO"].learn()
+
         if "RA-DDQN" in brain:
             s = env.getState(request_attrs, "RA-DDQN")
             if not args.Eval_Only and "RA-DDQN" in last:
                 brain["RA-DDQN"].store_transition(last["RA-DDQN"][0], last["RA-DDQN"][1], last["RA-DDQN"][2], s, mask)
-            a = _choose_value_policy(brain["RA-DDQN"], s, mask, args)
+            a = _choose_enhanced_baseline_action(brain["RA-DDQN"], s, mask, env, request_attrs, "RA-DDQN", args)
             r = env.feedback(request_attrs, a, "RA-DDQN")
             if not args.Eval_Only and global_step > args.RA_start_learn and global_step % args.RA_learn_interval == 0:
                 brain["RA-DDQN"].learn()
@@ -584,7 +818,7 @@ for episode in range(args.Epoch):
             s = env.getState(request_attrs, "PB-SafeDQN")
             if not args.Eval_Only and "PB-SafeDQN" in last:
                 brain["PB-SafeDQN"].store_transition(last["PB-SafeDQN"][0], last["PB-SafeDQN"][1], last["PB-SafeDQN"][2], s, mask)
-            a = _choose_value_policy(brain["PB-SafeDQN"], s, mask, args)
+            a = _choose_enhanced_baseline_action(brain["PB-SafeDQN"], s, mask, env, request_attrs, "PB-SafeDQN", args)
             r = env.feedback_primary_backup(request_attrs, a, "PB-SafeDQN")
             if not args.Eval_Only and global_step > args.PB_start_learn and global_step % args.PB_learn_interval == 0:
                 brain["PB-SafeDQN"].learn()
@@ -604,7 +838,10 @@ for episode in range(args.Epoch):
             if teacher_action is not None:
                 frac = max(0.0, 1.0 - episode / max(args.COBRA_Teacher_Guidance_Episodes, 1))
                 teacher_prob = max(args.COBRA_Min_Teacher_Prob, args.COBRA_Teacher_Start_Prob * frac)
-            a = int(teacher_action) if teacher_action is not None and np.random.rand() < teacher_prob else _choose_value_policy(brain["COBRA-Oracle"], s, mask, args)
+            if teacher_action is not None and np.random.rand() < teacher_prob:
+                a = int(teacher_action)
+            else:
+                a = _choose_enhanced_baseline_action(brain["COBRA-Oracle"], s, mask, env, request_attrs, "COBRA-Oracle", args)
             r = env.feedback_primary_backup(request_attrs, a, "COBRA-Oracle")
             if not args.Eval_Only and global_step > args.COBRA_start_learn and global_step % args.COBRA_learn_interval == 0:
                 brain["COBRA-Oracle"].learn()

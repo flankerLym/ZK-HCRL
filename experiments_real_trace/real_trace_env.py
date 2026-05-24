@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass, asdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -28,7 +28,7 @@ from env import SchedulingEnv as BaseSchedulingEnv
 @dataclass
 class RealTraceConfig:
     real_trace_path: str = os.path.join("experiments_real_trace",
-                                        "../../../../../下载/tco_drl_real_trace_guarded_eval_fix_v2_shortpath/experiments_real_trace/data", "real_oracle_trace.csv")
+                                        "../../../../../下载/tco_drl_real_trace_ccfb_baselines_cover_code_v2_fix_methods/experiments_real_trace/data", "real_oracle_trace.csv")
     real_trace_split: str = "train"  # train/test/all
     real_trace_train_days: int = 20
     real_trace_auto_request_num: bool = False
@@ -61,7 +61,35 @@ class RealTraceConfig:
     hcrl_eval_parallel_max_rate: float = 0.75
     hcrl_eval_min_requests_for_guard: int = 100
     hcrl_eval_q_margin: float = 0.05
+    # Fair stronger-baseline switch. This does not alter HCRL; it only lets
+    # non-HCRL baselines use a transparent risk/reputation tie-breaker over
+    # the RL model's top-K candidate actions. Use it only when reporting
+    # baselines as tuned / safety-enhanced baselines.
+    enhance_baseline_safety: bool = False
+    baseline_enhance_targets: str = "DQN,RA-DDQN,PB-SafeDQN,COBRA-Oracle"
+    baseline_enhance_topk: int = 10
+    baseline_enhance_q_weight: float = 1.00
+    baseline_enhance_risk_weight: float = 0.55
+    baseline_enhance_rep_weight: float = 0.25
+    baseline_enhance_ontime_weight: float = 0.20
+    baseline_enhance_cost_weight: float = 0.08
+    baseline_enhance_trusted_bonus: float = 0.10
+    baseline_enhance_malicious_penalty: float = 0.10
+    baseline_enhance_max_q_drop: float = 0.35
+    # Safe-PPO / constrained PPO action filter.  The policy network still learns
+    # normally; this layer only re-ranks near-top policy actions using observable
+    # risk, reputation, cost and deadline estimates.
+    safe_ppo_topk: int = 10
+    safe_ppo_policy_weight: float = 1.00
+    safe_ppo_risk_weight: float = 0.70
+    safe_ppo_rep_weight: float = 0.35
+    safe_ppo_ontime_weight: float = 0.25
+    safe_ppo_cost_weight: float = 0.08
+    safe_ppo_max_policy_drop: float = 0.45
     real_trace_verbose: bool = True
+    # Optional method override parsed before the project-level argparse sees it.
+    # This avoids root argparse method choices rejecting newly added baselines.
+    real_trace_methods: Optional[List[str]] = None
 
 
 def strip_real_trace_args(argv: List[str]) -> RealTraceConfig:
@@ -93,6 +121,26 @@ def strip_real_trace_args(argv: List[str]) -> RealTraceConfig:
     parser.add_argument("--HCRL_Eval_Parallel_Max_Rate", type=float, default=RealTraceConfig.hcrl_eval_parallel_max_rate)
     parser.add_argument("--HCRL_Eval_Min_Requests_For_Guard", type=int, default=RealTraceConfig.hcrl_eval_min_requests_for_guard)
     parser.add_argument("--HCRL_Eval_Q_Margin", type=float, default=RealTraceConfig.hcrl_eval_q_margin)
+    parser.add_argument("--Enhance_Baseline_Safety", action="store_true", default=False)
+    parser.add_argument("--Baseline_Enhance_Targets", type=str, default=RealTraceConfig.baseline_enhance_targets)
+    parser.add_argument("--Baseline_Enhance_TopK", type=int, default=RealTraceConfig.baseline_enhance_topk)
+    parser.add_argument("--Baseline_Enhance_Q_Weight", type=float, default=RealTraceConfig.baseline_enhance_q_weight)
+    parser.add_argument("--Baseline_Enhance_Risk_Weight", type=float, default=RealTraceConfig.baseline_enhance_risk_weight)
+    parser.add_argument("--Baseline_Enhance_Rep_Weight", type=float, default=RealTraceConfig.baseline_enhance_rep_weight)
+    parser.add_argument("--Baseline_Enhance_Ontime_Weight", type=float, default=RealTraceConfig.baseline_enhance_ontime_weight)
+    parser.add_argument("--Baseline_Enhance_Cost_Weight", type=float, default=RealTraceConfig.baseline_enhance_cost_weight)
+    parser.add_argument("--Baseline_Enhance_Trusted_Bonus", type=float, default=RealTraceConfig.baseline_enhance_trusted_bonus)
+    parser.add_argument("--Baseline_Enhance_Malicious_Penalty", type=float, default=RealTraceConfig.baseline_enhance_malicious_penalty)
+    parser.add_argument("--Baseline_Enhance_Max_Q_Drop", type=float, default=RealTraceConfig.baseline_enhance_max_q_drop)
+    parser.add_argument("--Safe_PPO_TopK", type=int, default=RealTraceConfig.safe_ppo_topk)
+    parser.add_argument("--Safe_PPO_Policy_Weight", type=float, default=RealTraceConfig.safe_ppo_policy_weight)
+    parser.add_argument("--Safe_PPO_Risk_Weight", type=float, default=RealTraceConfig.safe_ppo_risk_weight)
+    parser.add_argument("--Safe_PPO_Rep_Weight", type=float, default=RealTraceConfig.safe_ppo_rep_weight)
+    parser.add_argument("--Safe_PPO_Ontime_Weight", type=float, default=RealTraceConfig.safe_ppo_ontime_weight)
+    parser.add_argument("--Safe_PPO_Cost_Weight", type=float, default=RealTraceConfig.safe_ppo_cost_weight)
+    parser.add_argument("--Safe_PPO_Max_Policy_Drop", type=float, default=RealTraceConfig.safe_ppo_max_policy_drop)
+    parser.add_argument("--Methods", nargs="+", default=None)
+    parser.add_argument("--Real_Trace_Methods", nargs="+", default=None)
     parser.add_argument("--Real_Trace_No_Verbose", action="store_true", default=False)
 
     ns, rest = parser.parse_known_args(argv[1:])
@@ -124,7 +172,26 @@ def strip_real_trace_args(argv: List[str]) -> RealTraceConfig:
         hcrl_eval_parallel_max_rate=float(ns.HCRL_Eval_Parallel_Max_Rate),
         hcrl_eval_min_requests_for_guard=int(ns.HCRL_Eval_Min_Requests_For_Guard),
         hcrl_eval_q_margin=float(ns.HCRL_Eval_Q_Margin),
+        enhance_baseline_safety=bool(ns.Enhance_Baseline_Safety),
+        baseline_enhance_targets=str(ns.Baseline_Enhance_Targets),
+        baseline_enhance_topk=int(ns.Baseline_Enhance_TopK),
+        baseline_enhance_q_weight=float(ns.Baseline_Enhance_Q_Weight),
+        baseline_enhance_risk_weight=float(ns.Baseline_Enhance_Risk_Weight),
+        baseline_enhance_rep_weight=float(ns.Baseline_Enhance_Rep_Weight),
+        baseline_enhance_ontime_weight=float(ns.Baseline_Enhance_Ontime_Weight),
+        baseline_enhance_cost_weight=float(ns.Baseline_Enhance_Cost_Weight),
+        baseline_enhance_trusted_bonus=float(ns.Baseline_Enhance_Trusted_Bonus),
+        baseline_enhance_malicious_penalty=float(ns.Baseline_Enhance_Malicious_Penalty),
+        baseline_enhance_max_q_drop=float(ns.Baseline_Enhance_Max_Q_Drop),
+        safe_ppo_topk=int(ns.Safe_PPO_TopK),
+        safe_ppo_policy_weight=float(ns.Safe_PPO_Policy_Weight),
+        safe_ppo_risk_weight=float(ns.Safe_PPO_Risk_Weight),
+        safe_ppo_rep_weight=float(ns.Safe_PPO_Rep_Weight),
+        safe_ppo_ontime_weight=float(ns.Safe_PPO_Ontime_Weight),
+        safe_ppo_cost_weight=float(ns.Safe_PPO_Cost_Weight),
+        safe_ppo_max_policy_drop=float(ns.Safe_PPO_Max_Policy_Drop),
         real_trace_verbose=not bool(ns.Real_Trace_No_Verbose),
+        real_trace_methods=list(ns.Real_Trace_Methods or ns.Methods or []) or None,
     )
 
 
@@ -136,7 +203,7 @@ def _resolve_trace_path(path: str) -> str:
     if os.path.exists(cwd_path):
         return cwd_path
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__),
-                                             "../../../../../下载/tco_drl_real_trace_guarded_eval_fix_v2_shortpath"))
+                                             "../../../../../下载/tco_drl_real_trace_ccfb_baselines_cover_code_v2_fix_methods"))
     return os.path.join(repo_root, p)
 
 
@@ -207,12 +274,40 @@ def attach_real_trace_args(args, cfg: RealTraceConfig):
     args.HCRL_Eval_Parallel_Max_Rate = cfg.hcrl_eval_parallel_max_rate
     args.HCRL_Eval_Min_Requests_For_Guard = cfg.hcrl_eval_min_requests_for_guard
     args.HCRL_Eval_Q_Margin = cfg.hcrl_eval_q_margin
+    args.Enhance_Baseline_Safety = cfg.enhance_baseline_safety
+    args.Baseline_Enhance_Targets = cfg.baseline_enhance_targets
+    args.Baseline_Enhance_TopK = cfg.baseline_enhance_topk
+    args.Baseline_Enhance_Q_Weight = cfg.baseline_enhance_q_weight
+    args.Baseline_Enhance_Risk_Weight = cfg.baseline_enhance_risk_weight
+    args.Baseline_Enhance_Rep_Weight = cfg.baseline_enhance_rep_weight
+    args.Baseline_Enhance_Ontime_Weight = cfg.baseline_enhance_ontime_weight
+    args.Baseline_Enhance_Cost_Weight = cfg.baseline_enhance_cost_weight
+    args.Baseline_Enhance_Trusted_Bonus = cfg.baseline_enhance_trusted_bonus
+    args.Baseline_Enhance_Malicious_Penalty = cfg.baseline_enhance_malicious_penalty
+    args.Baseline_Enhance_Max_Q_Drop = cfg.baseline_enhance_max_q_drop
+    args.Safe_PPO_TopK = cfg.safe_ppo_topk
+    args.Safe_PPO_Policy_Weight = cfg.safe_ppo_policy_weight
+    args.Safe_PPO_Risk_Weight = cfg.safe_ppo_risk_weight
+    args.Safe_PPO_Rep_Weight = cfg.safe_ppo_rep_weight
+    args.Safe_PPO_Ontime_Weight = cfg.safe_ppo_ontime_weight
+    args.Safe_PPO_Cost_Weight = cfg.safe_ppo_cost_weight
+    args.Safe_PPO_Max_Policy_Drop = cfg.safe_ppo_max_policy_drop
     args.Real_Trace_Time_Order = cfg.real_trace_time_order
     args.Real_Trace_Verbose = cfg.real_trace_verbose
     args.Real_Trace_Samples = int(len(df))
     args.Real_Trace_Time_Start = str(df["timestamp"].min())
     args.Real_Trace_Time_End = str(df["timestamp"].max())
     args.Real_Trace_Service_Types = service_types
+
+    # Override method list after root get_args() succeeds.  We parse --Methods
+    # ourselves so the project-level argparse does not reject newly added method
+    # names such as Reputation-Greedy or Safe-PPO.
+    if getattr(cfg, "real_trace_methods", None):
+        args.Baselines = list(cfg.real_trace_methods)
+        args.Methods = list(cfg.real_trace_methods)
+        args.Baseline_num = len(args.Baselines)
+        args.Use_HCRL = "HCRL-Oracle" in args.Baselines
+
     if cfg.real_trace_auto_request_num or cfg.real_trace_workload_mode == "full_trace":
         args.Request_Num = int(len(df))
     if getattr(args, "State_Mode", "original") == "original":
@@ -238,6 +333,16 @@ def attach_real_trace_args(args, cfg: RealTraceConfig):
               f"temperature={cfg.hcrl_eval_mode_temperature}, "
               f"parallel_max_rate={cfg.hcrl_eval_parallel_max_rate}, "
               f"q_margin={cfg.hcrl_eval_q_margin}")
+        if cfg.enhance_baseline_safety:
+            print(f"[Baseline enhancement] enabled=True, targets={cfg.baseline_enhance_targets}, "
+                  f"topk={cfg.baseline_enhance_topk}, q={cfg.baseline_enhance_q_weight}, "
+                  f"risk={cfg.baseline_enhance_risk_weight}, rep={cfg.baseline_enhance_rep_weight}, "
+                  f"ontime={cfg.baseline_enhance_ontime_weight}, cost={cfg.baseline_enhance_cost_weight}, "
+                  f"max_q_drop={cfg.baseline_enhance_max_q_drop}")
+        print(f"[Safe-PPO] topk={cfg.safe_ppo_topk}, policy={cfg.safe_ppo_policy_weight}, "
+              f"risk={cfg.safe_ppo_risk_weight}, rep={cfg.safe_ppo_rep_weight}, "
+              f"ontime={cfg.safe_ppo_ontime_weight}, cost={cfg.safe_ppo_cost_weight}, "
+              f"max_policy_drop={cfg.safe_ppo_max_policy_drop}")
     return args
 
 
