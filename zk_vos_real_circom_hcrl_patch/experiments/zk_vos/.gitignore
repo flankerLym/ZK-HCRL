@@ -1,0 +1,9 @@
+node_modules/
+build/
+proof/
+cache/
+artifacts/
+*.ptau
+*.zkey
+*.wtns
+results/*.tmp

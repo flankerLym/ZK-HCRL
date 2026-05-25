@@ -1,0 +1,34 @@
+{
+  "row": 0,
+  "levels": 8,
+  "selectedOracleId": 1,
+  "oraclePoolRoot": "2277905215638524028754096120320901878287849991617374577889699480033134120399",
+  "publicSignalsOrder": [
+    "requestId",
+    "selectedOracleHash",
+    "oraclePoolRoot",
+    "reputationThreshold",
+    "costBudget",
+    "riskBudget",
+    "deadline",
+    "requestServiceType"
+  ],
+  "selectedOracle": {
+    "oracleId": 1,
+    "oracleServiceType": 1,
+    "repEff": 7200,
+    "cost": 120,
+    "risk": 80,
+    "latencyEst": 30,
+    "cooldown": 0
+  },
+  "schedule": {
+    "requestId": 1001,
+    "selectedOracleId": 1,
+    "requestServiceType": 1,
+    "reputationThreshold": 7000,
+    "costBudget": 200,
+    "riskBudget": 150,
+    "deadline": 60
+  }
+}

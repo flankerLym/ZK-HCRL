@@ -1,0 +1,8 @@
+case,expected,status
+invalid_low_reputation.json,rejected,rejected
+invalid_over_cost.json,rejected,rejected
+invalid_over_risk.json,rejected,rejected
+invalid_over_latency.json,rejected,rejected
+invalid_cooldown.json,rejected,rejected
+invalid_service_mismatch.json,rejected,rejected
+invalid_membership.json,rejected,rejected
