@@ -11,9 +11,16 @@ module.exports = {
       },
     },
   },
+  networks: {
+    hardhat: {
+      chainId: 31337,
+      blockGasLimit: 60000000,
+    },
+  },
   gasReporter: {
     enabled: true,
     currency: "USD",
     showTimeSpent: true,
+    excludeContracts: [],
   },
 };

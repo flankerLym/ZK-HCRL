@@ -14,14 +14,26 @@ describe("OracleScheduleRegistry with real snarkjs verifier", function () {
 
     const Verifier = await ethers.getContractFactory("Groth16Verifier");
     const verifier = await Verifier.deploy();
-    await verifier.deployed();
+    const verifierDeployReceipt = await verifier.deployTransaction.wait();
+    console.log("Groth16Verifier deployment gasUsed:", verifierDeployReceipt.gasUsed.toString());
 
     const Registry = await ethers.getContractFactory("OracleScheduleRegistry");
     const registry = await Registry.deploy(verifier.address);
-    await registry.deployed();
+    const registryDeployReceipt = await registry.deployTransaction.wait();
+    console.log("OracleScheduleRegistry deployment gasUsed:", registryDeployReceipt.gasUsed.toString());
 
     const calldata = JSON.parse(fs.readFileSync(calldataPath, "utf8"));
-    await expect(registry.submitSchedule(calldata.pA, calldata.pB, calldata.pC, calldata.pubSignals))
-      .to.emit(registry, "ScheduleAccepted");
+    const tx = await registry.submitSchedule(
+      calldata.pA,
+      calldata.pB,
+      calldata.pC,
+      calldata.pubSignals
+    );
+    const receipt = await tx.wait();
+    console.log("submitSchedule with real Groth16 verifier gasUsed:", receipt.gasUsed.toString());
+
+    expect(receipt.status).to.equal(1);
+    const accepted = receipt.events.find((e) => e.event === "ScheduleAccepted");
+    expect(accepted).to.not.equal(undefined);
   });
 });

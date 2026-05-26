@@ -5,11 +5,11 @@ describe("OracleScheduleRegistry with MockVerifier", function () {
   async function deployFixture() {
     const MockVerifier = await ethers.getContractFactory("MockVerifier");
     const verifier = await MockVerifier.deploy();
-    await verifier.waitForDeployment();
+    await verifier.deployed();
 
     const Registry = await ethers.getContractFactory("OracleScheduleRegistry");
-    const registry = await Registry.deploy(await verifier.getAddress());
-    await registry.waitForDeployment();
+    const registry = await Registry.deploy(verifier.address);
+    await registry.deployed();
     return { verifier, registry };
   }
 
@@ -20,15 +20,31 @@ describe("OracleScheduleRegistry with MockVerifier", function () {
 
   it("accepts a schedule when verifier returns true", async function () {
     const { registry } = await deployFixture();
-    await expect(registry.submitSchedule(pA, pB, pC, pubSignals))
-      .to.emit(registry, "ScheduleAccepted")
-      .withArgs(1, 12345, 67890);
+    const tx = await registry.submitSchedule(pA, pB, pC, pubSignals);
+    const receipt = await tx.wait();
+
+    console.log("Mock submitSchedule accepted gasUsed:", receipt.gasUsed.toString());
+    expect(receipt.status).to.equal(1);
+
+    const accepted = receipt.events.find((e) => e.event === "ScheduleAccepted");
+    expect(accepted).to.not.equal(undefined);
+    expect(accepted.args.requestId.toString()).to.equal("1");
+    expect(accepted.args.selectedOracleHash.toString()).to.equal("12345");
+    expect(accepted.args.oraclePoolRoot.toString()).to.equal("67890");
   });
 
   it("rejects a schedule when verifier returns false", async function () {
     const { verifier, registry } = await deployFixture();
     await verifier.setShouldAccept(false);
-    await expect(registry.submitSchedule(pA, pB, pC, pubSignals))
-      .to.be.revertedWith("ZK_VOS_INVALID_SCHEDULE_PROOF");
+
+    let reverted = false;
+    try {
+      const tx = await registry.submitSchedule(pA, pB, pC, pubSignals);
+      await tx.wait();
+    } catch (err) {
+      reverted = true;
+      expect(String(err.message)).to.include("ZK_VOS_INVALID_SCHEDULE_PROOF");
+    }
+    expect(reverted).to.equal(true);
   });
 });
