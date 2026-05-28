@@ -3,6 +3,10 @@ const path = require("path");
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
+// This test intentionally avoids hardhat-chai-matchers, so it works with the
+// stable Hardhat 2 + ethers v5 stack. It checks the receipt manually instead of
+// using expect(tx).to.emit(...), which requires @nomicfoundation/hardhat-chai-matchers.
+
 describe("OracleScheduleRegistry with real snarkjs verifier", function () {
   it("submits a real valid proof if generated verifier/calldata exist", async function () {
     const verifierArtifactPath = path.join(__dirname, "../contracts/Verifier.sol");
@@ -33,7 +37,11 @@ describe("OracleScheduleRegistry with real snarkjs verifier", function () {
     console.log("submitSchedule with real Groth16 verifier gasUsed:", receipt.gasUsed.toString());
 
     expect(receipt.status).to.equal(1);
-    const accepted = receipt.events.find((e) => e.event === "ScheduleAccepted");
-    expect(accepted).to.not.equal(undefined);
+
+    const accepted = (receipt.events || []).find((e) => e.event === "ScheduleAccepted");
+    if (!accepted) {
+      const eventNames = (receipt.events || []).map((e) => e.event || e.eventSignature || "unknown");
+      throw new Error(`ScheduleAccepted event not found. Events seen: ${eventNames.join(", ")}`);
+    }
   });
 });

@@ -1,26 +1,21 @@
 {
   "name": "zk-vos-experiment",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "Zero-Knowledge Verifiable Oracle Scheduling experiment for HCRL-Oracle",
   "scripts": {
-    "generate-inputs": "node scripts/generate_inputs.js --row 0 --levels 8",
-    "test:mock": "hardhat test test/mock_registry.test.js",
-    "test:real": "hardhat test test/real_proof_registry.test.js",
     "test": "hardhat test",
-    "compile:contracts": "hardhat compile",
-    "real-proof": "scripts/run_real_proof_pipeline.bat",
-    "check:invalid": "node scripts/check_invalid_witnesses.js",
-    "metrics": "node scripts/collect_real_proof_metrics.js"
+    "compile": "hardhat compile",
+    "clean": "hardhat clean",
+    "real-trace": "scripts/run_hcrl_trace_zk_batch.bat"
   },
   "devDependencies": {
     "@nomiclabs/hardhat-ethers": "2.2.3",
-    "chai": "4.3.10",
-    "circomlib": "2.0.5",
-    "circomlibjs": "0.1.7",
+    "chai": "^4.3.10",
+    "circomlib": "^2.0.5",
+    "circomlibjs": "^0.1.7",
     "ethers": "5.7.2",
     "hardhat": "2.19.5",
-    "hardhat-gas-reporter": "1.0.10",
-    "snarkjs": "0.7.6"
+    "hardhat-gas-reporter": "^1.0.10",
+    "snarkjs": "^0.7.6"
   }
 }

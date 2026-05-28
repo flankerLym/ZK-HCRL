@@ -17,7 +17,6 @@ import pandas as pd
 from env import SchedulingEnv
 from model import baseline_DQN, baseline_PPO, DuelingDoubleDQN, OptionActorCritic, baselines, BLOR
 from utils import get_args
-from trace_export_utils import HCRLTraceExporter
 
 
 class Tee:
@@ -337,11 +336,6 @@ flags = {"cobra": False, "hcrl": False}
 eval_start = min(2000, max(0, args.Request_Num // 2))
 last_results = None
 
-# [HCRL_TRACE_EXPORT] initialize exporter
-trace_exporter = HCRLTraceExporter(RUN_DIR, RUN_ID, args)
-if trace_exporter.enabled:
-    print(f"[HCRL trace] enabled; trace files will be saved under {RUN_DIR}")
-
 for episode in range(args.Epoch):
     print(f"----------------------------Episode {episode} ----------------------------")
     env.reset(args)
@@ -517,18 +511,7 @@ for episode in range(args.Epoch):
             if not args.Eval_Only and "HCRL_Backup" in last:
                 brain["HCRL_Backup"].store_transition(last["HCRL_Backup"][0], last["HCRL_Backup"][1], last["HCRL_Backup"][2], s_primary, backup_mask, last["HCRL_Backup"][3])
 
-
-            # [HCRL_TRACE_EXPORT] capture decision evidence before environment transition
-            trace_exporter.capture_decision(
-                env, args, RUN_ID, episode, request_attrs,
-                mode_action, primary_action, backup_action, time_period, global_step
-            )
             feedback = env.feedback_hcrl(request_attrs, mode_action, primary_action, backup_action, "HCRL-Oracle")
-            # [HCRL_TRACE_EXPORT] capture execution/audit evidence after environment transition
-            trace_exporter.capture_execution(
-                env, args, RUN_ID, episode, request_attrs,
-                mode_action, primary_action, backup_action, feedback
-            )
             if not args.Eval_Only and global_step > args.HCRL_start_learn and global_step % args.HCRL_Mode_learn_interval == 0:
                 brain["HCRL_Mode"].learn()
             if not args.Eval_Only and global_step > args.HCRL_start_learn and global_step % args.HCRL_learn_interval == 0:
@@ -550,10 +533,6 @@ for episode in range(args.Epoch):
 
     summarize_episode(env, args, eval_start, episode)
     last_results = collect_final_results(env, args, eval_start)
-
-# [HCRL_TRACE_EXPORT] save per-request traces
-if trace_exporter is not None and trace_exporter.enabled:
-    trace_exporter.save()
 
 # Save final results.
 if last_results is None:
