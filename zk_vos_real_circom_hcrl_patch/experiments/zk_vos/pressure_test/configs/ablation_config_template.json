@@ -1,0 +1,50 @@
+{
+  "note": "Fill r1cs/wasm/zkey/vkey paths after compiling each circuit. Paths are resolved relative to this JSON file.",
+  "circuits": [
+    {
+      "name": "Membership only",
+      "circuit": "../circuits/membership_only.circom",
+      "r1cs": "../build/membership_only/membership_only.r1cs",
+      "wasm": "../build/membership_only/membership_only_js/membership_only.wasm",
+      "zkey": "../build/membership_only/membership_only_final.zkey",
+      "vkey": "../build/membership_only/verification_key.json",
+      "input": "../inputs/membership_only_input.json"
+    },
+    {
+      "name": "+ Cost/Latency",
+      "circuit": "../circuits/cost_latency.circom",
+      "r1cs": "../build/cost_latency/cost_latency.r1cs",
+      "wasm": "../build/cost_latency/cost_latency_js/cost_latency.wasm",
+      "zkey": "../build/cost_latency/cost_latency_final.zkey",
+      "vkey": "../build/cost_latency/verification_key.json",
+      "input": "../inputs/cost_latency_input.json"
+    },
+    {
+      "name": "+ Risk",
+      "circuit": "../circuits/risk.circom",
+      "r1cs": "../build/risk/risk.r1cs",
+      "wasm": "../build/risk/risk_js/risk.wasm",
+      "zkey": "../build/risk/risk_final.zkey",
+      "vkey": "../build/risk/verification_key.json",
+      "input": "../inputs/risk_input.json"
+    },
+    {
+      "name": "+ Audit update",
+      "circuit": "../circuits/audit_update.circom",
+      "r1cs": "../build/audit_update/audit_update.r1cs",
+      "wasm": "../build/audit_update/audit_update_js/audit_update.wasm",
+      "zkey": "../build/audit_update/audit_update_final.zkey",
+      "vkey": "../build/audit_update/verification_key.json",
+      "input": "../inputs/audit_update_input.json"
+    },
+    {
+      "name": "Full ZK-VOS",
+      "circuit": "../circuits/full_zk_vos.circom",
+      "r1cs": "../build/full_zk_vos/full_zk_vos.r1cs",
+      "wasm": "../build/full_zk_vos/full_zk_vos_js/full_zk_vos.wasm",
+      "zkey": "../build/full_zk_vos/full_zk_vos_final.zkey",
+      "vkey": "../build/full_zk_vos/verification_key.json",
+      "input": "../inputs/full_zk_vos_input.json"
+    }
+  ]
+}

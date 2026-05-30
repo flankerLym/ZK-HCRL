@@ -1,0 +1,14 @@
+{
+  "requestId": 1,
+  "selectedOracleId": 3,
+  "serviceMatch": 1,
+  "cooldownFlag": 0,
+  "repEff": 8200,
+  "cost": 720,
+  "risk": 320,
+  "latencyEst": 4200,
+  "reputationThreshold": 6000,
+  "costBudget": 1000,
+  "riskBudget": 600,
+  "deadline": 6000
+}

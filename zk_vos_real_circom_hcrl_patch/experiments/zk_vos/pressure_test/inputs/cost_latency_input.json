@@ -1,0 +1,10 @@
+{
+  "requestId": 1,
+  "selectedOracleId": 3,
+  "serviceMatch": 1,
+  "cooldownFlag": 0,
+  "cost": 720,
+  "latencyEst": 4200,
+  "costBudget": 1000,
+  "deadline": 6000
+}
