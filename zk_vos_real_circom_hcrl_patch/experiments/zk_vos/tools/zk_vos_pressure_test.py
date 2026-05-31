@@ -1,35 +1,46 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ZK-VOS pressure/scalability and circuit-ablation benchmark.
+Fixed ZK-VOS pressure/scalability benchmark.
 
-This script is designed for the TCO-DRL HCRL ZK-VOS experiments.
-It produces two paper-ready tables:
+Why this version exists
+-----------------------
+The previous pressure-test run produced 0 successful proofs because the generated
+input JSON did not match the real `zk_vos_full.circom` witness schema.  The full
+circuit requires Poseidon-derived public inputs and Merkle membership data:
 
-1) Batch verification / scalability
+  selectedOracleHash = Poseidon(oracleId)
+  leaf = Poseidon(oracleId, oracleServiceType, repEff, cost, risk, latencyEst, cooldown)
+  oraclePoolRoot = MerkleRoot(leaf, pathElements, pathIndices)
+
+The old script filled missing fields with 0 when `--circuit` was not passed, so
+the constraints in the full circuit could not be satisfied.  This patched script
+uses the accompanying Node.js helper `zk_vos_enrich_full_inputs.js` to generate
+valid full-circuit inputs with circomlibjs Poseidon.
+
+Main outputs
+------------
+1) ZK-VOS batch scalability:
    #Schedules | Avg. Proof Time | Avg. Verify Time | Avg. Verify Gas | Success Verify Rate | Total Gas
 
-2) Circuit ablation
-   Circuit | Constraints | Proof Time | Verify Time | Verify Gas
+2) Optional circuit ablation:
+   Circuit | Constraints | Proof Time | Verify Time | Verify Gas | Success Verify Rate
 
-The script intentionally keeps gas handling flexible because on-chain gas is usually
-measured by an existing Hardhat/Foundry single-proof test. Pass that measured value
-through --single-verify-gas or pass a per-circuit gas map JSON through --gas-map.
+Recommended command
+-------------------
+python zk_vos_pressure_test.py stress ^
+  --snarkjs E:\\OpenClaw\\snarkjs.cmd ^
+  --trace-csv zk_vos_real_circom_hcrl_patch\\experiments\\zk_vos\\data\\trace_hcrl_zk_schedule_trace.csv ^
+  --wasm zk_vos_real_circom_hcrl_patch\\experiments\\zk_vos\\build\\zk_vos_full_js\\zk_vos_full.wasm ^
+  --zkey zk_vos_real_circom_hcrl_patch\\experiments\\zk_vos\\build\\zk_vos_full_final.zkey ^
+  --vkey zk_vos_real_circom_hcrl_patch\\experiments\\zk_vos\\build\\verification_key.json ^
+  --sizes "100 500 1000 5000" ^
+  --single-verify-gas 272132 ^
+  --repeat-trace-rows
 
-Dependencies for real proving/verifying:
-  - Node.js
-  - snarkjs in PATH, or pass --snarkjs path/to/snarkjs.cmd
-  - existing .wasm, .zkey, verification_key.json artifacts
-
-Examples:
-  python zk_vos_pressure_test.py stress --trace-csv data/trace_hcrl_zk_schedule_trace.csv \
-      --wasm circuits/zk_vos_js/zk_vos.wasm --zkey circuits/zk_vos_final.zkey \
-      --vkey circuits/verification_key.json --single-verify-gas 224532 \
-      --sizes "100 500 1000 5000" --repeat-trace-rows
-
-  python zk_vos_pressure_test.py ablation --ablation-config pressure_test/configs/ablation_config_template.json
-
-  python zk_vos_pressure_test.py full ...same stress args... --ablation-config ...
+For overhead benchmarking, the default `--valid-witness-mode clamp` keeps trace-derived
+values but clamps invalid rows into a satisfiable witness.  Use `--valid-witness-mode strict`
+to preserve raw trace compliance exactly; invalid trace rows may fail proof generation.
 """
 
 from __future__ import annotations
@@ -48,12 +59,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
-# -----------------------------------------------------------------------------
-# Generic helpers
-# -----------------------------------------------------------------------------
+# ----------------------------- generic helpers -----------------------------
 
 
 def eprint(*args: Any) -> None:
@@ -62,6 +71,76 @@ def eprint(*args: Any) -> None:
 
 def now_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def mkdir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        if x is None or x == "":
+            return default
+        y = float(x)
+        if math.isnan(y) or math.isinf(y):
+            return default
+        return y
+    except Exception:
+        return default
+
+
+def safe_int(x: Any, default: int = 0) -> int:
+    try:
+        if x is None or x == "":
+            return default
+        return int(round(float(x)))
+    except Exception:
+        return default
+
+
+def parse_sizes(s: str) -> List[int]:
+    out = []
+    for token in re.split(r"[,\s]+", str(s).strip()):
+        if token:
+            out.append(int(token))
+    if not out:
+        raise ValueError("No batch sizes were provided")
+    return out
+
+
+def percentile(xs: List[float], q: float) -> float:
+    if not xs:
+        return float("nan")
+    xs = sorted(xs)
+    if len(xs) == 1:
+        return float(xs[0])
+    pos = (len(xs) - 1) * q
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return float(xs[lo])
+    return float(xs[lo] * (hi - pos) + xs[hi] * (pos - lo))
+
+
+def stats_ms(xs: List[float]) -> Dict[str, float]:
+    if not xs:
+        return {
+            "total_ms": float("nan"),
+            "mean_ms": float("nan"),
+            "median_ms": float("nan"),
+            "p95_ms": float("nan"),
+            "min_ms": float("nan"),
+            "max_ms": float("nan"),
+        }
+    return {
+        "total_ms": float(sum(xs)),
+        "mean_ms": float(statistics.mean(xs)),
+        "median_ms": float(statistics.median(xs)),
+        "p95_ms": percentile(xs, 0.95),
+        "min_ms": float(min(xs)),
+        "max_ms": float(max(xs)),
+    }
 
 
 def ensure_executable(path_or_name: Optional[str], required: bool = True) -> Optional[str]:
@@ -75,16 +154,14 @@ def ensure_executable(path_or_name: Optional[str], required: bool = True) -> Opt
     found = shutil.which(path_or_name)
     if found:
         return found
-    # Windows npm global binaries sometimes exist as .cmd.
     if os.name == "nt" and not str(path_or_name).lower().endswith(".cmd"):
-        found_cmd = shutil.which(f"{path_or_name}.cmd")
-        if found_cmd:
-            return found_cmd
+        found = shutil.which(f"{path_or_name}.cmd")
+        if found:
+            return found
     if required:
         raise FileNotFoundError(
             f"Executable not found in PATH: {path_or_name}. "
-            "For snarkjs, install with `npm install -g snarkjs`, or pass "
-            "--snarkjs C:/path/to/snarkjs.cmd."
+            "Install it or pass an explicit path, e.g. --snarkjs E:/OpenClaw/snarkjs.cmd."
         )
     return None
 
@@ -103,7 +180,7 @@ def ensure_file(path: Optional[str], name: str, required: bool = True) -> Option
 
 
 def run_cmd(cmd: Sequence[str], cwd: Optional[Path] = None, timeout: Optional[int] = None) -> subprocess.CompletedProcess:
-    proc = subprocess.run(
+    return subprocess.run(
         list(map(str, cmd)),
         cwd=str(cwd) if cwd else None,
         stdout=subprocess.PIPE,
@@ -112,7 +189,6 @@ def run_cmd(cmd: Sequence[str], cwd: Optional[Path] = None, timeout: Optional[in
         timeout=timeout,
         shell=False,
     )
-    return proc
 
 
 def timed_cmd(cmd: Sequence[str], cwd: Optional[Path] = None, timeout: Optional[int] = None) -> Tuple[float, subprocess.CompletedProcess]:
@@ -120,11 +196,6 @@ def timed_cmd(cmd: Sequence[str], cwd: Optional[Path] = None, timeout: Optional[
     proc = run_cmd(cmd, cwd=cwd, timeout=timeout)
     t1 = time.perf_counter()
     return (t1 - t0) * 1000.0, proc
-
-
-def mkdir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def read_json(path: Path) -> Any:
@@ -154,264 +225,135 @@ def write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: Optional[List[
             w.writerow(row)
 
 
-def safe_float(x: Any, default: float = 0.0) -> float:
-    try:
-        if x is None or x == "":
-            return default
-        y = float(x)
-        if math.isnan(y) or math.isinf(y):
-            return default
-        return y
-    except Exception:
-        return default
+def write_markdown_table(path: Path, rows: List[Dict[str, Any]], columns: List[str], title: str) -> None:
+    mkdir(path.parent)
 
+    def fmt(v: Any) -> str:
+        if isinstance(v, float):
+            if math.isnan(v):
+                return ""
+            if abs(v) < 1 and v != 0:
+                return f"{v:.4f}"
+            return f"{v:.3f}"
+        return str(v)
 
-def safe_int(x: Any, default: int = 0) -> int:
-    try:
-        if x is None or x == "":
-            return default
-        return int(round(float(x)))
-    except Exception:
-        return default
-
-
-def parse_sizes(s: str) -> List[int]:
-    out = []
-    for token in re.split(r"[,\s]+", str(s).strip()):
-        if not token:
-            continue
-        out.append(int(token))
-    if not out:
-        raise ValueError("No batch sizes were provided")
-    return out
-
-
-def percentile(xs: List[float], q: float) -> float:
-    if not xs:
-        return float("nan")
-    xs2 = sorted(xs)
-    if len(xs2) == 1:
-        return float(xs2[0])
-    pos = (len(xs2) - 1) * q
-    lo = int(math.floor(pos))
-    hi = int(math.ceil(pos))
-    if lo == hi:
-        return float(xs2[lo])
-    return float(xs2[lo] * (hi - pos) + xs2[hi] * (pos - lo))
-
-
-def stats_ms(xs: List[float]) -> Dict[str, float]:
-    if not xs:
-        return {
-            "total_ms": float("nan"),
-            "mean_ms": float("nan"),
-            "median_ms": float("nan"),
-            "p95_ms": float("nan"),
-            "min_ms": float("nan"),
-            "max_ms": float("nan"),
-        }
-    return {
-        "total_ms": float(sum(xs)),
-        "mean_ms": float(statistics.mean(xs)),
-        "median_ms": float(statistics.median(xs)),
-        "p95_ms": percentile(xs, 0.95),
-        "min_ms": float(min(xs)),
-        "max_ms": float(max(xs)),
-    }
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# {title}\n\n")
+        f.write("| " + " | ".join(columns) + " |\n")
+        f.write("| " + " | ".join(["---"] * len(columns)) + " |\n")
+        for row in rows:
+            f.write("| " + " | ".join(fmt(row.get(c, "")) for c in columns) + " |\n")
 
 
 def find_latest_file(root: Path, patterns: Sequence[str]) -> Optional[Path]:
-    candidates: List[Path] = []
     if not root.exists():
         return None
+    candidates: List[Path] = []
     for pat in patterns:
         candidates.extend(root.rglob(pat))
     files = [p for p in candidates if p.is_file()]
-    if not files:
-        return None
-    return max(files, key=lambda p: p.stat().st_mtime)
+    return max(files, key=lambda p: p.stat().st_mtime) if files else None
 
 
-# -----------------------------------------------------------------------------
-# Input schema mapping
-# -----------------------------------------------------------------------------
+# ----------------------------- trace conversion -----------------------------
 
 
 def read_trace_csv(trace_csv: Path) -> List[Dict[str, str]]:
     with open(trace_csv, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+        rows = list(csv.DictReader(f))
     if not rows:
         raise ValueError(f"Trace CSV is empty: {trace_csv}")
     return rows
 
 
-def parse_circom_input_signals(circuit_path: Optional[Path]) -> Optional[List[str]]:
-    if circuit_path is None or not circuit_path.exists():
-        return None
-    text = circuit_path.read_text(encoding="utf-8", errors="ignore")
-    # Match `signal input foo;` and `signal input foo[n];`.
-    names = re.findall(r"signal\s+input\s+([A-Za-z_][A-Za-z0-9_]*)", text)
-    # Deduplicate while preserving order.
-    out: List[str] = []
-    for n in names:
-        if n not in out:
-            out.append(n)
-    return out or None
-
-
-def _row_first(row: Dict[str, Any], keys: Sequence[str], default: Any = 0) -> Any:
+def row_first(row: Dict[str, Any], keys: Sequence[str], default: Any = 0) -> Any:
     for k in keys:
         if k in row and row[k] not in (None, ""):
             return row[k]
     return default
 
 
-def trace_row_to_base_values(row: Dict[str, Any], index: int = 0) -> Dict[str, int]:
-    """Convert one HCRL trace row into canonical integer values.
-
-    All values are integer scaled values expected by Circom circuits.  The trace
-    exporter already creates *_scaled fields. If a scaled field is missing, we
-    derive it from the floating value.
-    """
-    rep = safe_int(_row_first(row, ["repEff_scaled", "rep_scaled", "reputation_scaled"], None), -1)
+def trace_row_to_base_values(row: Dict[str, Any], index: int = 0, valid_witness_mode: str = "clamp") -> Dict[str, int]:
+    rep = safe_int(row_first(row, ["repEff_scaled", "rep_scaled", "reputation_scaled"], None), -1)
     if rep < 0:
-        rep = safe_int(safe_float(_row_first(row, ["repEff", "rep", "reputation"], 0.0)) * 10000)
+        rep = safe_int(safe_float(row_first(row, ["repEff", "rep", "reputation"], 0.0)) * 10000)
 
-    cost = safe_int(_row_first(row, ["cost_scaled", "cost"], None), -1)
-    # If `cost` looks like a floating small value, scale by 1000.
+    cost = safe_int(row_first(row, ["cost_scaled"], None), -1)
     if cost < 0:
-        cost = safe_int(safe_float(_row_first(row, ["cost"], 0.0)) * 1000)
-    elif "cost_scaled" not in row and safe_float(row.get("cost", cost)) < 100.0:
-        cost = safe_int(safe_float(row.get("cost", 0.0)) * 1000)
+        c = safe_float(row_first(row, ["cost"], 0.0))
+        cost = safe_int(c * 1000) if c < 100.0 else safe_int(c)
 
-    risk = safe_int(_row_first(row, ["risk_scaled", "risk"], None), -1)
+    risk = safe_int(row_first(row, ["risk_scaled"], None), -1)
     if risk < 0:
-        risk = safe_int(safe_float(_row_first(row, ["risk"], 0.0)) * 10000)
-    elif "risk_scaled" not in row and safe_float(row.get("risk", risk)) <= 1.0:
-        risk = safe_int(safe_float(row.get("risk", 0.0)) * 10000)
+        r = safe_float(row_first(row, ["risk"], 0.0))
+        risk = safe_int(r * 10000) if r <= 1.0 else safe_int(r)
 
-    latency = safe_int(_row_first(row, ["latencyEst_scaled", "latency_scaled", "latency", "final_duration"], None), -1)
+    latency = safe_int(row_first(row, ["latencyEst_scaled", "latency_scaled"], None), -1)
     if latency < 0:
-        latency = safe_int(safe_float(_row_first(row, ["latencyEst", "latency", "final_duration"], 0.0)) * 1000)
-    elif "latencyEst_scaled" not in row and safe_float(_row_first(row, ["latencyEst", "latency", "final_duration"], latency)) < 100.0:
-        latency = safe_int(safe_float(_row_first(row, ["latencyEst", "latency", "final_duration"], 0.0)) * 1000)
+        lt = safe_float(row_first(row, ["latencyEst", "latency", "final_duration"], 0.0))
+        latency = safe_int(lt * 1000) if lt < 100.0 else safe_int(lt)
 
-    rep_th = safe_int(_row_first(row, ["reputationThreshold", "repThreshold", "reputation_threshold"], 6000))
-    cost_budget = safe_int(_row_first(row, ["costBudget", "cost_budget"], 1000))
-    risk_budget = safe_int(_row_first(row, ["riskBudget", "risk_budget"], 600))
-    deadline = safe_int(_row_first(row, ["deadline", "deadline_scaled"], 6000))
+    rep_th = safe_int(row_first(row, ["reputationThreshold", "repThreshold", "reputation_threshold"], 6000))
+    cost_budget = safe_int(row_first(row, ["costBudget", "cost_budget"], 1000))
+    risk_budget = safe_int(row_first(row, ["riskBudget", "risk_budget"], 600))
+    deadline = safe_int(row_first(row, ["deadline", "deadline_scaled"], 6000))
 
-    service_match = safe_int(_row_first(row, ["service_match", "serviceMatch"], 1))
-    cooldown = safe_int(_row_first(row, ["cooldown_flag", "cooldownFlag", "cooldown"], 0))
+    selected = safe_int(row_first(row, ["selectedOracleId", "oracleId", "selected_oracle_id"], index))
+    request_id = safe_int(row_first(row, ["request_id", "requestId"], index))
 
-    selected = safe_int(_row_first(row, ["selectedOracleId", "oracleId", "selected_oracle_id"], index))
-    request_id = safe_int(_row_first(row, ["request_id", "requestId"], index))
-    mode_id = safe_int(_row_first(row, ["mode_id", "modeId"], 0))
-    backup_id = safe_int(_row_first(row, ["backupOracleId", "backupId"], -1))
-    if backup_id < 0:
-        backup_id = 0
+    request_service_type = safe_int(row_first(row, ["request_service_type", "requestServiceType"], 0))
+    oracle_service_type = safe_int(row_first(row, ["oracleServiceType", "oracle_service_type"], request_service_type))
+    cooldown = safe_int(row_first(row, ["cooldown_flag", "cooldownFlag", "cooldown"], 0))
 
-    audit_truth = safe_int(_row_first(row, ["audit_truth_scaled", "auditTruth", "audit_truth"], None), -1)
-    if audit_truth < 0:
-        audit_truth = safe_int(safe_float(_row_first(row, ["audit_truth"], 0.0)) * 10000)
-
-    pre_truth = safe_int(_row_first(row, ["audit_truth_before_scaled", "auditTruthBefore"], audit_truth))
-    post_truth = safe_int(_row_first(row, ["audit_truth_after_scaled", "auditTruthAfter"], audit_truth))
-    audit_pass = safe_int(_row_first(row, ["audit_pass", "auditPass"], 1))
-    audit_fail = safe_int(_row_first(row, ["audit_fail", "auditFail"], 0))
-
-    is_compliant = int(
-        rep >= rep_th
-        and cost <= cost_budget
-        and risk <= risk_budget
-        and latency <= deadline
-        and service_match == 1
-        and cooldown == 0
-    )
-    if "zk_is_compliant" in row:
-        # Keep trace exporter result if present; it reflects the exact runtime rule.
-        is_compliant = safe_int(row.get("zk_is_compliant"), is_compliant)
+    # For benchmark mode, ensure the witness satisfies the circuit so proof time and
+    # verification time can be measured reliably.  Strict mode preserves raw values.
+    if valid_witness_mode == "clamp":
+        rep = max(rep, rep_th)
+        cost = min(cost, cost_budget)
+        risk = min(risk, risk_budget)
+        latency = min(latency, deadline)
+        cooldown = 0
+        oracle_service_type = request_service_type
+    elif valid_witness_mode == "filter":
+        # filtering happens before conversion; here keep raw values
+        pass
+    elif valid_witness_mode == "strict":
+        pass
+    else:
+        raise ValueError(f"Unknown valid_witness_mode: {valid_witness_mode}")
 
     return {
         "requestId": request_id,
-        "selectedOracleId": selected,
         "oracleId": selected,
-        "backupOracleId": backup_id,
-        "modeId": mode_id,
+        "selectedOracleId": selected,
+        "requestServiceType": request_service_type,
+        "oracleServiceType": oracle_service_type,
         "repEff": rep,
-        "reputation": rep,
         "cost": cost,
         "risk": risk,
-        "latency": latency,
         "latencyEst": latency,
+        "cooldown": cooldown,
         "reputationThreshold": rep_th,
-        "repThreshold": rep_th,
         "costBudget": cost_budget,
         "riskBudget": risk_budget,
         "deadline": deadline,
-        "serviceMatch": service_match,
-        "service_match": service_match,
-        "cooldownFlag": cooldown,
-        "cooldown": cooldown,
-        "auditTruth": audit_truth,
-        "auditTruthBefore": pre_truth,
-        "auditTruthAfter": post_truth,
-        "auditPass": audit_pass,
-        "auditFail": audit_fail,
-        "isCompliant": is_compliant,
-        "zkIsCompliant": is_compliant,
     }
 
 
-def build_input_for_signals(base: Dict[str, int], signals: Optional[List[str]]) -> Dict[str, int]:
-    """Build an input JSON dictionary.
+def is_trace_row_satisfiable(row: Dict[str, Any]) -> bool:
+    b = trace_row_to_base_values(row, 0, valid_witness_mode="strict")
+    return (
+        b["repEff"] >= b["reputationThreshold"]
+        and b["cost"] <= b["costBudget"]
+        and b["risk"] <= b["riskBudget"]
+        and b["latencyEst"] <= b["deadline"]
+        and b["cooldown"] == 0
+        and b["oracleServiceType"] == b["requestServiceType"]
+    )
 
-    If the circuit input names are known, only those keys are written. This avoids
-    witness-calculator failures caused by extra unknown signal names. If no input
-    list is available, a compact common schema is used.
-    """
-    aliases = {
-        "selectedOracleId": ["selectedOracleId", "oracleId"],
-        "oracleId": ["oracleId", "selectedOracleId"],
-        "repEff": ["repEff", "reputation"],
-        "reputation": ["reputation", "repEff"],
-        "latencyEst": ["latencyEst", "latency"],
-        "latency": ["latency", "latencyEst"],
-        "repThreshold": ["repThreshold", "reputationThreshold"],
-        "reputationThreshold": ["reputationThreshold", "repThreshold"],
-        "service_match": ["service_match", "serviceMatch"],
-        "serviceMatch": ["serviceMatch", "service_match"],
-        "cooldownFlag": ["cooldownFlag", "cooldown"],
-        "cooldown": ["cooldown", "cooldownFlag"],
-        "zkIsCompliant": ["zkIsCompliant", "isCompliant"],
-        "isCompliant": ["isCompliant", "zkIsCompliant"],
-    }
-    if signals:
-        obj: Dict[str, int] = {}
-        missing: List[str] = []
-        for s in signals:
-            if s in base:
-                obj[s] = int(base[s])
-                continue
-            found = False
-            for a in aliases.get(s, []):
-                if a in base:
-                    obj[s] = int(base[a])
-                    found = True
-                    break
-            if not found:
-                missing.append(s)
-                obj[s] = 0
-        if missing:
-            eprint(f"[warning] filled missing circuit inputs with 0: {missing}")
-        return obj
-    common_keys = [
-        "selectedOracleId", "repEff", "cost", "risk", "latencyEst",
-        "reputationThreshold", "costBudget", "riskBudget", "deadline",
-        "serviceMatch", "cooldownFlag", "auditTruth", "isCompliant",
-    ]
-    return {k: int(base[k]) for k in common_keys if k in base}
+
+def helper_path_near_script() -> Path:
+    return Path(__file__).resolve().parent / "zk_vos_enrich_full_inputs.js"
 
 
 def prepare_inputs_from_trace(
@@ -419,29 +361,60 @@ def prepare_inputs_from_trace(
     out_dir: Path,
     n: int,
     repeat_trace_rows: bool,
-    circuit_path: Optional[Path] = None,
+    valid_witness_mode: str,
+    node: str,
+    helper_js: Path,
+    timeout: Optional[int],
 ) -> List[Path]:
-    signals = parse_circom_input_signals(circuit_path)
+    if valid_witness_mode == "filter":
+        filtered = [r for r in rows if is_trace_row_satisfiable(r)]
+        if not filtered:
+            raise ValueError("No satisfiable rows found in trace under --valid-witness-mode filter.")
+        rows = filtered
+
     if n > len(rows) and not repeat_trace_rows:
         raise ValueError(
-            f"Requested {n} schedules but trace has only {len(rows)} rows. "
+            f"Requested {n} schedules but trace has only {len(rows)} usable rows. "
             "Use --repeat-trace-rows to cycle through the trace."
         )
+
     mkdir(out_dir)
-    paths: List[Path] = []
-    for i in range(n):
-        row = rows[i % len(rows)]
-        base = trace_row_to_base_values(row, i)
-        obj = build_input_for_signals(base, signals)
-        path = out_dir / f"input_{i:06d}.json"
-        write_json(path, obj)
-        paths.append(path)
+    base_jsonl = out_dir / "_base_inputs.jsonl"
+    with open(base_jsonl, "w", encoding="utf-8") as f:
+        for i in range(n):
+            row = rows[i % len(rows)]
+            obj = trace_row_to_base_values(row, i, valid_witness_mode=valid_witness_mode)
+            obj["index"] = i
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+    if not helper_js.exists():
+        raise FileNotFoundError(f"Missing helper JS: {helper_js}")
+
+    cmd = [
+        node,
+        str(helper_js),
+        "--jsonl", str(base_jsonl),
+        "--out-dir", str(out_dir),
+        "--levels", "8",
+    ]
+    proc = run_cmd(cmd, timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to enrich full-circuit inputs with Poseidon/Merkle fields.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"stdout:\n{proc.stdout[-4000:]}\n"
+            f"stderr:\n{proc.stderr[-4000:]}\n"
+            "Make sure `npm install` has been run in experiments/zk_vos so circomlibjs is available."
+        )
+
+    paths = [out_dir / f"input_{i:06d}.json" for i in range(n)]
+    missing = [str(p) for p in paths if not p.exists()]
+    if missing:
+        raise RuntimeError(f"Input helper did not create all expected files. Missing first entries: {missing[:5]}")
     return paths
 
 
-# -----------------------------------------------------------------------------
-# snarkjs proving and verification
-# -----------------------------------------------------------------------------
+# ----------------------------- snarkjs execution ----------------------------
 
 
 @dataclass
@@ -487,6 +460,7 @@ def run_proof_verify_batch(
     mkdir(proof_dir)
     mkdir(public_dir)
     results: List[ProofResult] = []
+
     for i, input_path in enumerate(inputs):
         proof_path = proof_dir / f"proof_{i:06d}.json"
         public_path = public_dir / f"public_{i:06d}.json"
@@ -508,10 +482,16 @@ def run_proof_verify_batch(
             verify_time_ms, vproc = snarkjs_verify(snarkjs, vkey, public_path, proof_path, timeout)
             v_stdout = vproc.stdout[-4000:]
             v_stderr = vproc.stderr[-4000:]
-            combined = f"{vproc.stdout}\n{vproc.stderr}".lower()
-            verify_success = (vproc.returncode == 0 and ("ok" in combined or "valid" in combined or vproc.returncode == 0))
+            verify_success = (vproc.returncode == 0)
         elif skip_verify:
             verify_success = True
+
+        if not proof_ok and (i < 3 or (i + 1) % 50 == 0):
+            eprint(f"[proof failed] index={i} input={input_path}")
+            if p_stderr:
+                eprint(p_stderr[-1000:])
+            elif p_stdout:
+                eprint(p_stdout[-1000:])
 
         results.append(ProofResult(
             index=i,
@@ -527,15 +507,17 @@ def run_proof_verify_batch(
             verify_stdout=v_stdout,
             verify_stderr=v_stderr,
         ))
+
         if (i + 1) % 50 == 0 or i == len(inputs) - 1:
             print(f"  processed {i + 1}/{len(inputs)} proofs")
+
     return results
 
 
-def proof_results_to_rows(batch_size: int, results: List[ProofResult]) -> List[Dict[str, Any]]:
+def proof_results_to_rows(batch_size: int, results: List[ProofResult], include_logs: bool = True) -> List[Dict[str, Any]]:
     out = []
     for r in results:
-        out.append({
+        row = {
             "batch_size": batch_size,
             "index": r.index,
             "input_path": r.input_path,
@@ -545,7 +527,11 @@ def proof_results_to_rows(batch_size: int, results: List[ProofResult]) -> List[D
             "verify_time_ms": r.verify_time_ms,
             "proof_ok": int(r.proof_ok),
             "verify_success": int(r.verify_success),
-        })
+        }
+        if include_logs:
+            row["proof_error_tail"] = (r.proof_stderr or r.proof_stdout)[-1000:]
+            row["verify_error_tail"] = (r.verify_stderr or r.verify_stdout)[-1000:]
+        out.append(row)
     return out
 
 
@@ -553,6 +539,7 @@ def summarize_stress(batch_size: int, results: List[ProofResult], avg_verify_gas
     proof_times = [r.proof_time_ms for r in results if r.proof_ok and not math.isnan(r.proof_time_ms)]
     verify_times = [r.verify_time_ms for r in results if r.verify_success and not math.isnan(r.verify_time_ms)]
     success_count = sum(1 for r in results if r.verify_success)
+    proof_count = sum(1 for r in results if r.proof_ok)
     proof_stats = stats_ms(proof_times)
     verify_stats = stats_ms(verify_times)
     total_gas = int(avg_verify_gas * batch_size) if avg_verify_gas is not None else ""
@@ -567,53 +554,29 @@ def summarize_stress(batch_size: int, results: List[ProofResult], avg_verify_gas
         "P95 Verify Time (ms)": verify_stats["p95_ms"],
         "Avg. Verify Gas": avg_verify_gas if avg_verify_gas is not None else "",
         "Success Verify Rate": success_count / max(len(results), 1),
+        "Proof Success Rate": proof_count / max(len(results), 1),
         "Total Gas": total_gas,
+        "successful_proofs": proof_count,
         "successful_verifications": success_count,
         "attempted": len(results),
         "throughput_proof_per_s": 1000.0 / proof_stats["mean_ms"] if proof_stats["mean_ms"] and not math.isnan(proof_stats["mean_ms"]) else "",
     }
 
 
-def write_markdown_table(path: Path, rows: List[Dict[str, Any]], columns: List[str], title: str) -> None:
-    mkdir(path.parent)
-    def fmt(v: Any) -> str:
-        if isinstance(v, float):
-            if math.isnan(v):
-                return ""
-            if abs(v) < 1 and v != 0:
-                return f"{v:.4f}"
-            return f"{v:.3f}"
-        return str(v)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(f"# {title}\n\n")
-        f.write("| " + " | ".join(columns) + " |\n")
-        f.write("| " + " | ".join(["---"] * len(columns)) + " |\n")
-        for row in rows:
-            f.write("| " + " | ".join(fmt(row.get(c, "")) for c in columns) + " |\n")
-
-
-# -----------------------------------------------------------------------------
-# Circuit constraints and ablation
-# -----------------------------------------------------------------------------
+# ----------------------------- ablation support -----------------------------
 
 
 def snarkjs_r1cs_info(snarkjs: str, r1cs: Path, timeout: Optional[int]) -> Tuple[int, str]:
-    cmd = [snarkjs, "r1cs", "info", str(r1cs)]
-    proc = run_cmd(cmd, timeout=timeout)
+    proc = run_cmd([snarkjs, "r1cs", "info", str(r1cs)], timeout=timeout)
     text = f"{proc.stdout}\n{proc.stderr}"
-    # snarkjs output examples:
-    #   # of Constraints: 1234
-    #   Number of constraints: 1234
-    patterns = [
+    for pat in [
         r"#\s*of\s*Constraints\s*[:=]\s*([0-9]+)",
         r"Number\s+of\s+constraints\s*[:=]\s*([0-9]+)",
         r"constraints\s*[:=]\s*([0-9]+)",
-    ]
-    for pat in patterns:
+    ]:
         m = re.search(pat, text, flags=re.IGNORECASE)
         if m:
             return int(m.group(1)), text
-    # Some versions output JSON-like terms; fall back to first line containing constraints.
     for line in text.splitlines():
         if "constraint" in line.lower():
             nums = re.findall(r"[0-9]+", line)
@@ -630,16 +593,13 @@ def load_gas_map(path: Optional[str]) -> Dict[str, int]:
         raise FileNotFoundError(f"Gas map does not exist: {p}")
     data = read_json(p)
     if not isinstance(data, dict):
-        raise ValueError("Gas map must be a JSON object, e.g. {\"Full ZK-VOS\": 224532}")
+        raise ValueError('Gas map must be a JSON object, e.g. {"Full ZK-VOS": 272132}')
     return {str(k): safe_int(v) for k, v in data.items()}
 
 
 def load_ablation_config(path: Path) -> List[Dict[str, Any]]:
     data = read_json(path)
-    if isinstance(data, dict) and "circuits" in data:
-        circuits = data["circuits"]
-    else:
-        circuits = data
+    circuits = data["circuits"] if isinstance(data, dict) and "circuits" in data else data
     if not isinstance(circuits, list):
         raise ValueError("Ablation config must be a list or an object with key 'circuits'.")
     out: List[Dict[str, Any]] = []
@@ -685,7 +645,7 @@ def benchmark_one_circuit(
         public = tmp / f"public_{i:03d}.json"
         pt, pproc = snarkjs_fullprove(snarkjs, input_json, wasm, zkey, proof, public, timeout)
         if pproc.returncode != 0:
-            eprint(f"[ablation warning] proof failed for {name}: {pproc.stderr[-500:]}")
+            eprint(f"[ablation warning] proof failed for {name}: {(pproc.stderr or pproc.stdout)[-1000:]}")
             continue
         proof_times.append(pt)
         vt, vproc = snarkjs_verify(snarkjs, vkey, public, proof, timeout)
@@ -693,10 +653,9 @@ def benchmark_one_circuit(
         if vproc.returncode == 0:
             ok += 1
 
+    norm_map = {re.sub(r"\s+", " ", k).strip().lower(): v for k, v in gas_map.items()}
     avg_gas = gas_map.get(name)
     if avg_gas is None:
-        # Also try normalized keys.
-        norm_map = {re.sub(r"\s+", " ", k).strip().lower(): v for k, v in gas_map.items()}
         avg_gas = norm_map.get(re.sub(r"\s+", " ", name).strip().lower())
     if avg_gas is None:
         avg_gas = safe_int(c.get("verify_gas"), -1)
@@ -716,18 +675,17 @@ def benchmark_one_circuit(
     }
 
 
-# -----------------------------------------------------------------------------
-# Main workflows
-# -----------------------------------------------------------------------------
+# ----------------------------- workflows -----------------------------
 
 
 def run_stress(args: argparse.Namespace, out_root: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Path]:
     snarkjs = ensure_executable(args.snarkjs, required=not args.prepare_only)
+    node = ensure_executable(args.node, required=True)
     trace_csv = ensure_file(args.trace_csv, "trace csv", required=True)
     wasm = ensure_file(args.wasm, "wasm", required=not args.prepare_only)
     zkey = ensure_file(args.zkey, "zkey", required=not args.prepare_only)
     vkey = ensure_file(args.vkey, "verification key", required=not args.prepare_only)
-    circuit = ensure_file(args.circuit, "circom circuit", required=False) if args.circuit else None
+    helper_js = ensure_file(args.input_helper, "input helper JS", required=True)
 
     rows = read_trace_csv(trace_csv)
     sizes = parse_sizes(args.sizes)
@@ -747,16 +705,17 @@ def run_stress(args: argparse.Namespace, out_root: Path) -> Tuple[List[Dict[str,
             out_dir=input_dir,
             n=batch_size,
             repeat_trace_rows=bool(args.repeat_trace_rows),
-            circuit_path=circuit,
+            valid_witness_mode=args.valid_witness_mode,
+            node=node,
+            helper_js=helper_js,
+            timeout=args.timeout,
         )
+
         if args.prepare_only:
-            results: List[ProofResult] = []
-            for i, p in enumerate(inputs):
-                results.append(ProofResult(
-                    index=i, input_path=str(p), proof_path="", public_path="",
-                    proof_time_ms=float("nan"), verify_time_ms=float("nan"),
-                    verify_success=False, proof_ok=False,
-                ))
+            results = [
+                ProofResult(i, str(p), "", "", float("nan"), float("nan"), False, False)
+                for i, p in enumerate(inputs)
+            ]
         else:
             assert snarkjs is not None and wasm is not None and zkey is not None and vkey is not None
             results = run_proof_verify_batch(
@@ -771,10 +730,12 @@ def run_stress(args: argparse.Namespace, out_root: Path) -> Tuple[List[Dict[str,
                 skip_prove=args.skip_prove,
                 skip_verify=args.skip_verify,
             )
-        raw_rows.extend(proof_results_to_rows(batch_size, results))
+
+        batch_raw = proof_results_to_rows(batch_size, results, include_logs=True)
+        raw_rows.extend(batch_raw)
         summary = summarize_stress(batch_size, results, args.single_verify_gas)
         summary_rows.append(summary)
-        write_csv(batch_dir / "raw.csv", proof_results_to_rows(batch_size, results))
+        write_csv(batch_dir / "raw.csv", batch_raw)
         write_json(batch_dir / "summary.json", summary)
 
     summary_csv = stress_dir / "zk_vos_stress_summary.csv"
@@ -823,36 +784,39 @@ def run_ablation(args: argparse.Namespace, out_root: Path) -> Tuple[List[Dict[st
     return rows, ablation_dir
 
 
-def auto_locate_artifacts(base_dir: Path) -> Dict[str, Optional[str]]:
-    """Best-effort artifact locator for the local ZK-VOS experiment folder."""
+def auto_locate_artifacts(base_dir: Path) -> Dict[str, str]:
     return {
         "trace_csv": str(find_latest_file(base_dir, ["*hcrl_zk_schedule_trace.csv", "trace_hcrl_zk_schedule_trace.csv"]) or ""),
-        "wasm": str(find_latest_file(base_dir, ["zk_vos.wasm", "*_js/*.wasm", "*.wasm"]) or ""),
-        "zkey": str(find_latest_file(base_dir, ["zk_vos_final.zkey", "*_final.zkey", "*.zkey"]) or ""),
+        "wasm": str(find_latest_file(base_dir, ["zk_vos_full.wasm", "zk_vos.wasm", "*_js/*.wasm", "*.wasm"]) or ""),
+        "zkey": str(find_latest_file(base_dir, ["zk_vos_full_final.zkey", "zk_vos_final.zkey", "*_final.zkey", "*.zkey"]) or ""),
         "vkey": str(find_latest_file(base_dir, ["verification_key.json", "*verification*.json"]) or ""),
+        "helper": str(find_latest_file(base_dir, ["zk_vos_enrich_full_inputs.js"]) or ""),
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="ZK-VOS pressure/scalability and circuit-ablation benchmark")
+    p = argparse.ArgumentParser(description="Fixed ZK-VOS pressure/scalability and circuit-ablation benchmark")
     sub = p.add_subparsers(dest="command")
 
     def add_common(q: argparse.ArgumentParser) -> None:
-        q.add_argument("--snarkjs", default="snarkjs", help="snarkjs executable. On Windows, you may pass snarkjs.cmd")
+        q.add_argument("--snarkjs", default="snarkjs", help="snarkjs executable. On Windows, pass E:/OpenClaw/snarkjs.cmd if needed.")
+        q.add_argument("--node", default="node", help="Node.js executable")
         q.add_argument("--out-dir", default="zk_vos_real_circom_hcrl_patch/experiments/zk_vos/results", help="Output root directory")
         q.add_argument("--run-name", default="", help="Optional run folder name")
         q.add_argument("--timeout", type=int, default=None, help="Timeout in seconds for each external command")
-        q.add_argument("--single-verify-gas", type=int, default=None, help="Existing measured single-proof verifier gas. Used to compute Avg Verify Gas and Total Gas.")
-        q.add_argument("--gas-map", default="", help="Optional JSON gas map for ablation, e.g. {\"Full ZK-VOS\": 224532}")
+        q.add_argument("--single-verify-gas", type=int, default=None, help="Measured submitSchedule gas; used to compute Avg Verify Gas and Total Gas.")
+        q.add_argument("--gas-map", default="", help='Optional JSON gas map, e.g. {"Full ZK-VOS": 272132}')
 
     def add_stress(q: argparse.ArgumentParser) -> None:
         q.add_argument("--trace-csv", default="", help="HCRL ZK schedule trace CSV, usually *_hcrl_zk_schedule_trace.csv")
-        q.add_argument("--wasm", default="", help="Compiled circuit wasm path")
+        q.add_argument("--wasm", default="", help="Compiled full circuit wasm path")
         q.add_argument("--zkey", default="", help="Groth16 proving key path")
         q.add_argument("--vkey", default="", help="Groth16 verification key JSON path")
-        q.add_argument("--circuit", default="", help="Optional .circom path for auto-detecting signal input names")
+        q.add_argument("--input-helper", default=str(helper_path_near_script()), help="Node helper used to compute Poseidon/Merkle full-circuit inputs")
         q.add_argument("--sizes", default="100 500 1000 5000", help="Batch sizes, e.g. '100 500 1000 5000'")
         q.add_argument("--repeat-trace-rows", action="store_true", help="Cycle through trace rows if trace is shorter than requested batch size")
+        q.add_argument("--valid-witness-mode", choices=["clamp", "filter", "strict"], default="clamp",
+                       help="clamp: make each trace-derived row satisfiable for overhead benchmark; filter: use only already satisfiable rows; strict: preserve raw trace values.")
         q.add_argument("--prepare-only", action="store_true", help="Only prepare input JSON files; do not call snarkjs")
         q.add_argument("--skip-prove", action="store_true", help="Skip proof generation and reuse existing proof/public files in output dirs")
         q.add_argument("--skip-verify", action="store_true", help="Skip snarkjs verification")
@@ -872,7 +836,7 @@ def build_parser() -> argparse.ArgumentParser:
     full.add_argument("--ablation-config", required=True, help="JSON config describing circuit variants")
     full.add_argument("--ablation-repeat", type=int, default=3, help="Number of proof/verify repeats per circuit variant")
 
-    locate = sub.add_parser("locate", help="Locate trace/wasm/zkey/vkey artifacts under a directory")
+    locate = sub.add_parser("locate", help="Locate trace/wasm/zkey/vkey/helper artifacts under a directory")
     locate.add_argument("--base-dir", default="zk_vos_real_circom_hcrl_patch", help="Directory to search")
     return p
 
@@ -885,8 +849,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     if args.command == "locate":
-        found = auto_locate_artifacts(Path(args.base_dir))
-        print(json.dumps(found, ensure_ascii=False, indent=2))
+        print(json.dumps(auto_locate_artifacts(Path(args.base_dir)), ensure_ascii=False, indent=2))
         return 0
 
     out_root = Path(args.out_dir)
@@ -912,7 +875,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             manifest["ablation_summary"] = ablation_rows
     finally:
         write_json(out_root / "manifest.json", manifest)
-        print(f"\nSaved manifest: {out_root / 'manifest.json'}")
+        print(f"Saved manifest: {out_root / 'manifest.json'}")
+
     return 0
 
 
