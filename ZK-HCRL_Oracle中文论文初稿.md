@@ -624,7 +624,7 @@ $$
 
 | Attack type | Behavior pattern |
 |---|---|
-| Reputation poisoning | 节点前期提供正常服务以积累信誉，随后在高价值请求中集中作恶 |
+| Reputation poisoning | 节点前期提供正常[ZK-HCRL_Oracle中文论文初稿.md](ZK-HCRL_Oracle%E4%B8%AD%E6%96%87%E8%AE%BA%E6%96%87%E5%88%9D%E7%A8%BF.md)服务以积累信誉，随后在高价值请求中集中作恶 |
 | Sleeper attack | 节点长期保持低风险或沉默状态，在触发阶段突然提供异常响应 |
 | Collusion shift | 多个节点在不同阶段转移异常行为，以分散审计风险 |
 | Burst attack | 节点在短时间窗口内产生高强度连续失败或异常报价 |

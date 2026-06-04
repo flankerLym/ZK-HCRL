@@ -1,4 +1,8 @@
-"""Plot paper-ready reputation degradation-and-recovery figure."""
+"""Plot paper-ready reputation degradation-and-recovery figure.
+
+Default representative panels now include one classic behavioral attack and two
+new economic/MEV attacks; the bar panel still summarizes all scenarios.
+"""
 from __future__ import annotations
 
 import argparse
@@ -13,10 +17,20 @@ LABELS = {
     "sleeper_attack": "Sleeper attack",
     "collusion_shift": "Collusion shift",
     "burst_attack": "Burst attack",
-    "gradual_drift": "Gradual drift",
     "intermittent_evasion": "Intermittent evasion",
+    "gradual_drift": "Gradual drift",
+    "mev_based_manipulation": "MEV-based manipulation",
+    "strategic_economic_collusion": "Strategic economic collusion",
+    "cross_chain_latency_attack": "Cross-chain latency attack",
+    "real_world_oracle_cartel": "Real-world oracle cartel",
+    "bribery_staking_game": "Bribery / staking game",
+    "liquidation_front_running": "Liquidation front-running",
 }
-DEFAULT_REPRESENTATIVE = ["reputation_poisoning", "sleeper_attack", "collusion_shift"]
+DEFAULT_REPRESENTATIVE = [
+    "reputation_poisoning",
+    "mev_based_manipulation",
+    "liquidation_front_running",
+]
 
 
 def parse_args():
@@ -49,9 +63,13 @@ def setup_style():
 
 
 def aggregate_curve(curve: pd.DataFrame) -> pd.DataFrame:
-    cols = ["malicious_rep_mean", "trusted_rep_mean", "normal_rep_mean", "reputation_gap", "attack_onset_step", "attack_end_step"]
-    agg = curve.groupby(["scenario", "step"], as_index=False)[cols].mean()
-    return agg
+    base_cols = ["malicious_rep_mean", "trusted_rep_mean", "attack_onset_step", "attack_end_step"]
+    optional = [c for c in ["normal_rep_mean", "reputation_gap", "attack_intensity"] if c in curve.columns]
+    cols = base_cols + optional
+    missing = [c for c in base_cols if c not in curve.columns]
+    if missing:
+        raise ValueError(f"curve csv missing columns: {missing}")
+    return curve.groupby(["scenario", "step"], as_index=False)[cols].mean()
 
 
 def add_phase_background(ax, onset: float, end: float, xmax: float):
@@ -99,12 +117,12 @@ def add_timeseries(ax, curve: pd.DataFrame, summary_row: pd.Series, scenario: st
 
 def add_summary_bar(ax, summary: pd.DataFrame):
     df = summary.copy()
-    df["scenario_label"] = df["scenario"].map(label)
+    df["scenario_label"] = df["scenario"].map(label).fillna(df["scenario"])
     df = df.sort_values("malicious_rep_drop_pct_mean", ascending=False)
     x = np.arange(len(df))
     width = 0.36
-    drop = df["malicious_rep_drop_pct_mean"].to_numpy()
-    rec = 100.0 * df["malicious_rep_recovery_ratio_mean"].to_numpy()
+    drop = np.nan_to_num(df["malicious_rep_drop_pct_mean"].to_numpy(), nan=0.0, posinf=0.0, neginf=0.0)
+    rec = np.nan_to_num(100.0 * df["malicious_rep_recovery_ratio_mean"].to_numpy(), nan=0.0, posinf=0.0, neginf=0.0)
     ax.bar(x - width / 2, drop, width=width, label="Reputation drop")
     ax.bar(x + width / 2, rec, width=width, label="Recovered fraction")
     ax.set_title("Drop and conservative recovery across attacks")
@@ -115,9 +133,9 @@ def add_summary_bar(ax, summary: pd.DataFrame):
     ax.grid(True, axis="y", alpha=0.25)
     ax.legend(frameon=False, loc="upper right")
     for xi, val in zip(x - width / 2, drop):
-        ax.text(xi, val + 1.2, f"{val:.1f}", ha="center", va="bottom", fontsize=8)
+        ax.text(xi, val + 1.2, f"{val:.1f}", ha="center", va="bottom", fontsize=7.5)
     for xi, val in zip(x + width / 2, rec):
-        ax.text(xi, val + 1.2, f"{val:.1f}", ha="center", va="bottom", fontsize=8)
+        ax.text(xi, val + 1.2, f"{val:.1f}", ha="center", va="bottom", fontsize=7.5)
 
 
 def main():
@@ -142,7 +160,7 @@ def main():
     add_summary_bar(axb, summary)
     axb.text(-0.12, 1.05, "(d)", transform=axb.transAxes, fontsize=13, fontweight="bold")
 
-    fig.suptitle("Asymmetric audit reputation dynamics under dynamic attacks", fontsize=15, y=1.01)
+    fig.suptitle("Asymmetric audit reputation dynamics under behavioral, economic and MEV attacks", fontsize=15, y=1.01)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, bbox_inches="tight")

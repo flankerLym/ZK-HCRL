@@ -1,7 +1,9 @@
-"""Plot all six dynamic attack reputation degradation-and-recovery curves.
+"""Plot all dynamic attack reputation degradation-and-recovery curves.
 
-This figure is intended for paper/appendix use when every attack scenario needs
-an explicit curve instead of only three representative panels.
+The default figure includes the original six behavior-level attacks plus six new
+MEV/economic/cross-chain attacks:
+    MEV-based manipulation, strategic economic collusion, cross-chain latency attack,
+    real-world oracle cartel, bribery/staking game, liquidation front-running.
 """
 from __future__ import annotations
 
@@ -19,6 +21,12 @@ LABELS = {
     "burst_attack": "Burst attack",
     "intermittent_evasion": "Intermittent evasion",
     "gradual_drift": "Gradual drift",
+    "mev_based_manipulation": "MEV-based manipulation",
+    "strategic_economic_collusion": "Strategic economic collusion",
+    "cross_chain_latency_attack": "Cross-chain latency attack",
+    "real_world_oracle_cartel": "Real-world oracle cartel",
+    "bribery_staking_game": "Bribery / staking game",
+    "liquidation_front_running": "Liquidation front-running",
 }
 
 DEFAULT_ALL_SCENARIOS = [
@@ -28,6 +36,12 @@ DEFAULT_ALL_SCENARIOS = [
     "burst_attack",
     "intermittent_evasion",
     "gradual_drift",
+    "mev_based_manipulation",
+    "strategic_economic_collusion",
+    "cross_chain_latency_attack",
+    "real_world_oracle_cartel",
+    "bribery_staking_game",
+    "liquidation_front_running",
 ]
 
 
@@ -38,9 +52,9 @@ def parse_args():
     p.add_argument("--out", required=True, help="Output PNG path")
     p.add_argument("--pdf-out", default=None, help="Optional output PDF path")
     p.add_argument("--scenarios", nargs="*", default=DEFAULT_ALL_SCENARIOS,
-                   help="Scenario order to plot. Default: all six attack scenarios.")
+                   help="Scenario order to plot. Default: all twelve attack scenarios.")
     p.add_argument("--ncols", type=int, default=3, help="Number of columns. Default: 3")
-    p.add_argument("--title", default="Asymmetric audit reputation dynamics across six dynamic attacks")
+    p.add_argument("--title", default="Asymmetric audit reputation dynamics across twelve oracle attack scenarios")
     return p.parse_args()
 
 
@@ -53,9 +67,9 @@ def setup_style():
         "font.size": 11,
         "axes.titlesize": 12,
         "axes.labelsize": 11,
-        "legend.fontsize": 10,
-        "xtick.labelsize": 9,
-        "ytick.labelsize": 10,
+        "legend.fontsize": 9,
+        "xtick.labelsize": 8.5,
+        "ytick.labelsize": 9.5,
         "figure.dpi": 180,
         "savefig.dpi": 300,
         "axes.spines.top": False,
@@ -75,7 +89,7 @@ def aggregate_curve(curve: pd.DataFrame) -> pd.DataFrame:
         "attack_onset_step", "attack_end_step",
     ]
     require_cols(curve, required, "curve csv")
-    optional = [c for c in ["normal_rep_mean", "reputation_gap"] if c in curve.columns]
+    optional = [c for c in ["normal_rep_mean", "reputation_gap", "attack_intensity"] if c in curve.columns]
     cols = ["malicious_rep_mean", "trusted_rep_mean", "attack_onset_step", "attack_end_step"] + optional
     return curve.groupby(["scenario", "step"], as_index=False)[cols].mean()
 
@@ -87,11 +101,11 @@ def add_phase_background(ax, onset: float, end: float, xmax: float):
     ax.axvline(onset, linestyle="--", linewidth=1.1)
     ax.axvline(end, linestyle=":", linewidth=1.1)
     y = 0.985
-    ax.text(onset / 2, y, "Benign / camouflage", ha="center", va="top", fontsize=7.5,
+    ax.text(onset / 2, y, "Benign", ha="center", va="top", fontsize=7,
             transform=ax.get_xaxis_transform())
-    ax.text((onset + end) / 2, y, "Attack", ha="center", va="top", fontsize=7.5,
+    ax.text((onset + end) / 2, y, "Attack", ha="center", va="top", fontsize=7,
             transform=ax.get_xaxis_transform())
-    ax.text((end + xmax) / 2, y, "Recovery", ha="center", va="top", fontsize=7.5,
+    ax.text((end + xmax) / 2, y, "Recovery", ha="center", va="top", fontsize=7,
             transform=ax.get_xaxis_transform())
 
 
@@ -115,8 +129,8 @@ def add_panel(ax, curve: pd.DataFrame, summary: pd.DataFrame, scenario: str, pan
     xmax = float(x.max())
     add_phase_background(ax, onset, end, xmax)
 
-    ax.plot(x, sdf["trusted_rep_mean"], linewidth=2.1, label="Trusted reputation")
-    ax.plot(x, sdf["malicious_rep_mean"], linewidth=2.1, label="Malicious reputation")
+    ax.plot(x, sdf["trusted_rep_mean"], linewidth=2.0, label="Trusted reputation")
+    ax.plot(x, sdf["malicious_rep_mean"], linewidth=2.0, label="Malicious reputation")
 
     row = get_row(summary, scenario)
     if row is not None:
@@ -134,15 +148,15 @@ def add_panel(ax, curve: pd.DataFrame, summary: pd.DataFrame, scenario: str, pan
             f"Asym.: {asym:.1f}×"
         )
         ax.text(0.98, 0.05, txt, ha="right", va="bottom", transform=ax.transAxes,
-                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.86, linewidth=0.8),
-                fontsize=9.2)
+                bbox=dict(boxstyle="round,pad=0.22", facecolor="white", alpha=0.86, linewidth=0.8),
+                fontsize=8.4)
 
     ax.set_title(label(scenario))
     ax.set_xlabel("Request step")
     ax.set_ylabel("Effective reputation")
     ax.set_ylim(0, 1.02)
     ax.grid(True, alpha=0.25)
-    ax.text(-0.12, 1.05, f"({panel_id})", transform=ax.transAxes, fontsize=13, fontweight="bold")
+    ax.text(-0.12, 1.05, f"({panel_id})", transform=ax.transAxes, fontsize=12, fontweight="bold")
     if legend:
         ax.legend(loc="upper right", frameon=False)
 
@@ -161,8 +175,8 @@ def main():
 
     ncols = max(1, int(args.ncols))
     nrows = int(math.ceil(len(scenarios) / ncols))
-    fig_w = 5.2 * ncols
-    fig_h = 4.25 * nrows
+    fig_w = 5.1 * ncols
+    fig_h = 4.05 * nrows
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), constrained_layout=True)
     axes_arr = np.atleast_1d(axes).reshape(nrows, ncols)
 
