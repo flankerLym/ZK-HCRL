@@ -1,0 +1,8 @@
+[
+  {
+    "requestId": 1001,
+    "asset": "BTC/USD",
+    "input": "testnet_artifacts/sample_input.json",
+    "note": "Replace or expand this list with generated inputs from the HCRL trace exporter."
+  }
+]
