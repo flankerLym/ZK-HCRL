@@ -1,3 +1,29 @@
-TCO-DRL_with baseline/.idea
-/TCO-DRL_with baseline/output
-/TCO-DRL_on blockchain/.idea
+HCRL_with baseline/.idea
+/HCRL_with baseline/output
+/HCRL_with baseline/output_trace
+/HCRL_with baseline/paper_figures
+/HCRL_with baseline/data
+/HCRL_on blockchain/.idea
+/tco_real_trace_dataset_collection/data
+/audit_reputation_recovery_experiments/example_output
+/audit_reputation_recovery_experiments/output
+/experiments_real_trace/output
+/zk_vos_real_circom_hcrl_patch/experiments/zk_vos/data
+/zk_vos_real_circom_hcrl_patch/experiments/zk_vos/build
+/zk_vos_real_circom_hcrl_patch/experiments/zk_vos/cache
+/zk_vos_real_circom_hcrl_patch/experiments/zk_vos/proof
+/zk_vos_real_circom_hcrl_patch/experiments/zk_vos/artifacts
+/zk_vos_real_circom_hcrl_patch/experiments/zk_vos/node_modules
+/zk_vos_real_circom_hcrl_patch/experiments/zk_vos/real_trace_inputs
+/zk_vos_real_circom_hcrl_patch/experiments/zk_vos/results
+/experiments_real_trace/output
+/weight
+/paperMuter
+/output
+/zk_vos_plus/data
+/zk_vos_plus/build
+/zk_vos_plus/cache
+/zk_vos_plus/artifacts
+/zk_vos_plus/node_modules
+/zk_vos_plus/real_trace_inputs
+/zk_vos_plus/results
