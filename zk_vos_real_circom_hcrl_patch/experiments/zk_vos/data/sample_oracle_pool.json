@@ -1,0 +1,77 @@
+{
+  "scale": "fixed-point scores scaled by 10000 where relevant",
+  "oracles": [
+    {
+      "oracleId": 1,
+      "oracleServiceType": 1,
+      "repEff": 7200,
+      "cost": 120,
+      "risk": 80,
+      "latencyEst": 30,
+      "cooldown": 0
+    },
+    {
+      "oracleId": 2,
+      "oracleServiceType": 2,
+      "repEff": 7450,
+      "cost": 145,
+      "risk": 100,
+      "latencyEst": 35,
+      "cooldown": 0
+    },
+    {
+      "oracleId": 3,
+      "oracleServiceType": 3,
+      "repEff": 7700,
+      "cost": 170,
+      "risk": 120,
+      "latencyEst": 40,
+      "cooldown": 0
+    },
+    {
+      "oracleId": 4,
+      "oracleServiceType": 1,
+      "repEff": 7950,
+      "cost": 195,
+      "risk": 140,
+      "latencyEst": 45,
+      "cooldown": 0
+    },
+    {
+      "oracleId": 5,
+      "oracleServiceType": 2,
+      "repEff": 8200,
+      "cost": 220,
+      "risk": 160,
+      "latencyEst": 50,
+      "cooldown": 0
+    },
+    {
+      "oracleId": 6,
+      "oracleServiceType": 3,
+      "repEff": 8450,
+      "cost": 245,
+      "risk": 180,
+      "latencyEst": 55,
+      "cooldown": 1
+    },
+    {
+      "oracleId": 7,
+      "oracleServiceType": 1,
+      "repEff": 8700,
+      "cost": 270,
+      "risk": 200,
+      "latencyEst": 60,
+      "cooldown": 0
+    },
+    {
+      "oracleId": 8,
+      "oracleServiceType": 2,
+      "repEff": 8950,
+      "cost": 295,
+      "risk": 220,
+      "latencyEst": 65,
+      "cooldown": 0
+    }
+  ]
+}

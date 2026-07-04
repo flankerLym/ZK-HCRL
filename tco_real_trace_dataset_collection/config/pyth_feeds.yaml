@@ -1,0 +1,21 @@
+# Pyth benchmark symbols used by scripts/real_trace/collect_pyth_benchmarks.py.
+feeds:
+  - asset: ETH/USD
+    binance_symbol: ETHUSDT
+    pyth_symbol: Crypto.ETH/USD
+    service_type: 0
+
+  - asset: BTC/USD
+    binance_symbol: BTCUSDT
+    pyth_symbol: Crypto.BTC/USD
+    service_type: 1
+
+  - asset: LINK/USD
+    binance_symbol: LINKUSDT
+    pyth_symbol: Crypto.LINK/USD
+    service_type: 2
+
+  - asset: SOL/USD
+    binance_symbol: SOLUSDT
+    pyth_symbol: Crypto.SOL/USD
+    service_type: 4

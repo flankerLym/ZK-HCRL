@@ -1,0 +1,33 @@
+{
+  "name": "zk-vos-plus-testnet",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Two-layer commitment-bound ZK-VOS plus public-testnet deployment scripts for ZK-HCRL Oracle.",
+  "scripts": {
+    "compile:sol": "hardhat compile",
+    "deploy:mock": "USE_MOCK_VERIFIER=1 hardhat run scripts/deploy_registry.js --network hardhat",
+    "deploy:amoy": "hardhat run scripts/deploy_registry.js --network polygonAmoy",
+    "deploy:sepolia": "hardhat run scripts/deploy_registry.js --network sepolia",
+    "input:sample": "node scripts/build_sample_witness.js > testnet_artifacts/sample_input.json",
+    "input:forged": "FORGE_SOURCE_MISMATCH=1 node scripts/build_sample_witness.js > testnet_artifacts/forged_source_mismatch_input.json",
+    "prove:sample": "snarkjs groth16 fullprove testnet_artifacts/sample_input.json testnet_artifacts/ZKVOSPlus_js/ZKVOSPlus.wasm testnet_artifacts/ZKVOSPlus_final.zkey testnet_artifacts/proof.json testnet_artifacts/public.json",
+    "export:verifier": "snarkjs zkey export solidityverifier testnet_artifacts/ZKVOSPlus_final.zkey contracts/ZKVOSPlusVerifier.sol",
+    "run:replay:amoy": "hardhat run scripts/run_public_replay.js --network polygonAmoy",
+    "run:replay:sepolia": "hardhat run scripts/run_public_replay.js --network sepolia",
+    "test:forged": "node scripts/test_forged_source_mismatch.js",
+    "deploy:verifier:amoy": "hardhat run scripts/deploy_verifier.js --network polygonAmoy",
+    "deploy:verifier:sepolia": "hardhat run scripts/deploy_verifier.js --network sepolia",
+    "deploy:verifier:local": "hardhat run scripts/deploy_verifier.js --network hardhat"
+  },
+  "dependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "circomlibjs": "^0.1.7",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.4",
+    "hardhat": "^2.22.15",
+    "snarkjs": "^0.7.5"
+  },
+  "devDependencies": {
+    "circomlib": "^2.0.5"
+  }
+}

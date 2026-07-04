@@ -18,10 +18,10 @@ Outputs:
   - Fig5_metric_heatmap.(png/pdf)
 
 Example:
-  python plot_tco_drl_paper_figures.py \
-    --log "E:/keyan/code/TCO/TCO-DRL/TCO-DRL_with baseline/output/.../xxx.txt" \
-    --out_dir "paper_figures" \
-    --last_n 10
+  python plot_tco_drl_paper_figures.py `
+    --log "E:\keyan\code\TCO\useful\ablation\26_5_15_18_40_Epoch30_Req6000_rl_harder_Seed3_ablation_hcrl_full\26_5_15_18_40_Epoch30_Req6000_rl_harder_Seed3_ablation_hcrl_full_final_results.csv" `
+    --out_dir "paper_figures" `
+    --last_n 5
 """
 from __future__ import annotations
 

@@ -1,0 +1,19 @@
+
+Remove-Item -Recurse -Force data\raw\binance -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force data\raw\chainlink -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force data\processed -ErrorAction SilentlyContinue
+
+
+.\scripts\real_trace\run_collect_real_trace.ps1 `
+  -StartDate "2026-04-01" `
+  -EndDate "2026-05-01" `
+  -RpcUrl "https://eth-mainnet.g.alchemy.com/v2/_0rlCVx3t2YtJyesh8u-7" `
+  -NoReceipts `
+  -SkipPyth `
+  -ChainlinkMode calls `
+  -HistoricalSampleSec 600 `
+  -BinanceSymbols @("ETHUSDT", "BTCUSDT", "LINKUSDT") `
+  -MaxRetries 8 `
+  -RetryBackoffSec 2 `
+  -RetryMaxBackoffSec 60 `
+  -SaveEvery 20

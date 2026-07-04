@@ -1,0 +1,10 @@
+{
+  "source": "hcrl_real_trace",
+  "validMode": "relaxed",
+  "proofStrategy": "selected_threshold_relaxed",
+  "schedulePath": "E:\\keyan\\code\\TCO\\TCO-DRL\\zk_vos_real_circom_hcrl_patch\\experiments\\zk_vos\\data\\trace_hcrl_zk_schedule_trace.csv",
+  "snapshotPath": "E:\\keyan\\code\\TCO\\TCO-DRL\\zk_vos_real_circom_hcrl_patch\\experiments\\zk_vos\\data\\trace_oracle_pool_snapshot.jsonl",
+  "request_id": 0,
+  "selectedOracleId": 2,
+  "levels": 8
+}

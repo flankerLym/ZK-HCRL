@@ -1,0 +1,11 @@
+python main.py `
+  --Methods DQN HCRL-Oracle `
+  --Scenario rl_harder `
+  --Use_Audit_Reputation `
+  --Epoch 1 `
+  --Request_Num 200 `
+  --Oracles_Per_Type 5 `
+  --Malicious_Ratio 0.3 `
+  --Malicious_Placement balanced `
+  --Run_Tag "smoke_mal30" `
+  --Seed 3

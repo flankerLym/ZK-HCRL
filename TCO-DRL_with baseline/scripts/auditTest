@@ -1,0 +1,11 @@
+.\scripts\experience\run_audit_sensitivity_loaded_weights.ps1 `
+  -Methods @("DQN", "HCRL-Oracle") `
+  -Seeds @(3) `
+  -MaliciousRatio 0.30 `
+  -OraclesPerType 40 `
+  -Epoch 10 `
+  -RequestNum 6000 `
+  -AttackProfile mixed `
+  -AttackIntensity 1.0 `
+  -HCRLWeightDir "output\multi-maliRate\26_5_18_19_10_Epoch50_Req6000_rl_harder_Seed3_oracle_scale_o40_mal30pct_lr8_hcrl" `
+  -DQNWeight "output\multi-maliRate\26_5_18_19_10_Epoch50_Req6000_rl_harder_Seed3_oracle_scale_o40_mal30pct_lr8_hcrl\DQN.npz"

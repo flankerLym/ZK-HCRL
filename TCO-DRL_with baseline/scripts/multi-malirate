@@ -1,0 +1,21 @@
+$mali_rates = @(50, 40, 30, 20, 10)
+
+foreach ($m in $mali_rates) {
+    $ratio = $m / 100.0
+
+    python main.py `
+      --Methods DQN HCRL-Oracle `
+      --Scenario rl_harder `
+      --Use_Audit_Reputation `
+      --Epoch 50 `
+      --Request_Num 6000 `
+      --Oracles_Per_Type 40 `
+      --Malicious_Ratio $ratio `
+      --Malicious_Placement balanced `
+      --Reward_Scale 3.0 `
+      --Reward_Clip 3.0 `
+      --HCRL_lr 0.0008 `
+      --HCRL_Mode_lr 0.000616 `
+      --Run_Tag "oracle_scale_o40_mal${m}pct_lr8_hcrl" `
+      --Seed 3
+}

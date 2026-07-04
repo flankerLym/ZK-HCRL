@@ -1,0 +1,10 @@
+experiments_real_trace/
+  real_trace_main.py                         Parallel runner copied from main.py, with real-trace adapter enabled.
+  real_trace_env.py                          Real-trace SchedulingEnv adapter: split, trace-risk, validation, staleness, anomaly injection.
+  summarize_real_trace_results.py            Collects final_results CSVs into one summary table.
+  README_real_trace_20_10.md                 Usage instructions.
+  data/real_oracle_trace.csv                 User-collected 30-day 3-asset trace.
+  data/real_oracle_trace_summary.csv         Trace summary.
+  scripts/smoke_test_real_trace.ps1          1-epoch small sanity check.
+  scripts/run_real_trace_20_10_hcrl.ps1      Train HCRL on first 20 days, test on last 10 days.
+  scripts/run_real_trace_20_10_rl_all.ps1    Train DQN/RA/PB/COBRA/HCRL on first 20 days, test on last 10 days.

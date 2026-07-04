@@ -1,0 +1,27 @@
+# Example Ethereum mainnet Chainlink feed proxy addresses.
+# Verify these addresses against the current Chainlink documentation before paper submission.
+
+feeds:
+  - asset: ETH/USD
+    symbol: ETHUSDT
+    address: "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419"
+    decimals: 8
+    service_type: 0
+
+  - asset: BTC/USD
+    symbol: BTCUSDT
+    address: "0xF4030086522a5bEEa4988F8cA5B36dbC97Bee88c"
+    decimals: 8
+    service_type: 1
+
+  - asset: LINK/USD
+    symbol: LINKUSDT
+    address: "0x2c1d072e956AFFC0D435Cb7AC38EF18d24d9127c"
+    decimals: 8
+    service_type: 2
+
+  - asset: USDC/USD
+    symbol: USDCUSDT
+    address: "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"
+    decimals: 8
+    service_type: 3

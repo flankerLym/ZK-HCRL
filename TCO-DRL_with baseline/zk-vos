@@ -1,0 +1,9 @@
+python "zk_vos_real_circom_hcrl_patch/experiments/zk_vos/tools/zk_vos_pressure_test.py" stress `
+  --snarkjs "E:\OpenClaw\snarkjs.cmd" `
+  --trace-csv "zk_vos_real_circom_hcrl_patch\experiments\zk_vos\data\trace_hcrl_zk_schedule_trace.csv" `
+  --wasm "zk_vos_real_circom_hcrl_patch\experiments\zk_vos\build\zk_vos_full_js\zk_vos_full.wasm" `
+  --zkey "zk_vos_real_circom_hcrl_patch\experiments\zk_vos\build\zk_vos_full_final.zkey" `
+  --vkey "zk_vos_real_circom_hcrl_patch\experiments\zk_vos\build\verification_key.json" `
+  --sizes "100 500 1000 2000 3000 4000 5000" `
+  --single-verify-gas 272132 `
+  --repeat-trace-rows

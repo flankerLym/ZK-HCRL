@@ -1,0 +1,21 @@
+$seeds = @(3, 6, 9)
+$oracle_nums = @(5, 10, 20, 30, 50)
+
+foreach ($o in $oracle_nums) {
+  foreach ($s in $seeds) {
+
+    python main.py `
+      --Methods DQN HCRL-Oracle `
+      --Scenario rl_harder `
+      --Use_Audit_Reputation `
+      --Epoch 30 `
+      --Request_Num 6000 `
+      --Oracles_Per_Type $o `
+      --Reward_Scale 3.0 `
+      --Reward_Clip 3.0 `
+      --HCRL_lr 0.0008 `
+      --HCRL_Mode_lr 0.000616 `
+      --Run_Tag "oracle_scale_o${o}_lr8_hcrl" `
+      --Seed $s
+  }
+}
